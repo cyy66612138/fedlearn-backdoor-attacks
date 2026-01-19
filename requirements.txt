@@ -1,0 +1,24 @@
+# Core dependencies - Required for all functionality
+# Exact versions from tested environment (Python 3.11.13)
+# Generated from installed packages in .venv
+torch==2.9.1
+torchvision==0.24.1
+numpy==2.4.1
+
+# Configuration and data handling
+PyYAML==6.0.3
+Pillow==12.1.0  # PIL for image datasets
+
+# Clustering and ML algorithms (required for aggregations)
+scikit-learn==1.8.0
+hdbscan==0.8.40  # Required for FLAME and other clustering-based aggregations
+
+# Utilities
+tqdm==4.67.1  # Progress bars for dataset downloads
+
+# Optional but recommended
+wandb==0.24.0  # Experiment tracking (can be disabled in config)
+psutil==7.2.1  # Memory monitoring
+
+# Optional visualization (for attacks/analysis)
+matplotlib==3.10.8

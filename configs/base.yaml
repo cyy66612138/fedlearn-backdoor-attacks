@@ -1,0 +1,79 @@
+# Base Federated Learning Configuration
+experiment:
+  name: "cifar10_resnet18_base_federated_learning"
+  description: "Base federated learning experiment without attacks"
+  seed: 42
+  debug: false
+  tags: ["federated", "clean", "baseline"]
+
+# GPU configuration
+gpu:
+  id: 0
+
+# Dataset configuration - CIFAR-10
+dataset:
+  name: "cifar10"
+  type: "image"
+  data_root: "./data"
+  partition_type: "non_iid"
+  alpha: 0.5
+  num_classes: 10
+  mean: [0.4914, 0.4822, 0.4465]
+  std: [0.2470, 0.2435, 0.2616]
+  data_shape: [3, 32, 32]
+
+# Model configuration
+model:
+  name: "resnet18"
+  weights: null  # Start from scratch
+  
+# Federated learning configuration
+federated_learning:
+  num_clients: 100
+  min_data_per_client: 100
+  max_data_per_client: 100000
+  participation_rate: 0.1
+  num_rounds: 600
+  local_epochs: 2
+  batch_size: 128
+  learning_rate: 0.001
+  optimizer: Adam
+  weight_decay: 0.0001
+
+# No adversarial clients
+adversarial_clients: []
+
+# No client attacks
+client_attacks: []
+
+# No client defenses
+client_defenses: []
+
+# Server aggregation methods
+server_aggregation:
+  - name: "FedAvg"
+    params: {}
+
+# No server defenses
+server_defenses: []
+
+# Evaluation configuration (without backdoor evaluation)
+evaluation:
+  metrics: ["accuracy", "loss"]
+  test_frequency: 1  # Evaluate every round
+  batch_size: 256
+  # No backdoor evaluation
+  backdoor_evaluation: false
+
+# Logging configuration
+logging:
+  save_results: true # config + results
+  save_results_dir: "./results/base" # results directory
+  save_checkpoints: true # model checkpoints
+  checkpoint_frequency: 100  # Save every 100 rounds
+  checkpoint_dir: "./checkpoints/base" # checkpoint directory
+  save_visualizations: false # save visualizations
+  visualize_dir: "./visualizations/base" # visualize directory
+  use_wandb: false  # Set to true if using wandb
+  project: "" # Set to the project name if using wandb
+  

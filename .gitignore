@@ -1,17 +1,68 @@
-.DS_Store
-FedML/
-config/
-PFL-Non-IID/
-3DFed/
-OOD_Federated_Learning/
-RLBackdoorFL/
+# Python
 __pycache__/
+*.py[cod]
 *.pyc
-saved_models/
-.data/
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ML Models & Checkpoints
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.pkl
+*.npy
+*.npz
+
+# Project directories
+logs/
+checkpoints/
+data/
+results/
+experiments/
 wandb/
-*.zip
-exps/run*
-env-variables.md
-synthesizers/checkpoint/
-synthesizers/atkmodel/
+configs/generated*/
+commands-v*.txt
+command-exps.txt
+
+# Temporary
+tmp/
+temp/
+*.tmp
+*.bak
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Coverage & Testing
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Cache
+.cache/
+.mypy_cache/
+.ruff_cache/
