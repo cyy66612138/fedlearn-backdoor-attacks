@@ -23,8 +23,8 @@ A comprehensive framework for implementing and evaluating backdoor attacks and d
 
 ```bash
 # Clone repository
-git clone <repository-url>
-cd <project-directory>
+git clone https://github.com/mtuann/fedlearn-backdoor-attacks.git
+cd fedlearn-backdoor-attacks
 
 # Install uv (if not installed)
 curl -LsSf https://astral.sh/uv/install.sh | sh
