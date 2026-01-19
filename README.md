@@ -306,3 +306,5 @@ Please cite the original papers when using specific attacks or defenses in your 
 **Backdoor Learning Papers (Up-to-date)**:
 - GitHub Repository: [backdoor-ai-resources](https://github.com/mtuann/backdoor-ai-resources) - Comprehensive collection of backdoor learning papers with code
 - Interactive Search & Browse: [Research Papers Portal](https://mtuann.github.io/papers/) - Filter, search, and explore all papers with an intuitive interface
+
+![Star History Chart](https://api.star-history.com/svg?repos=mtuann/fedlearn-backdoor-attacks&type=Date)
