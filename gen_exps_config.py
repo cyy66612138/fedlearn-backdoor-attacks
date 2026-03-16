@@ -342,33 +342,190 @@ def set_fl_aggregation(config: dict, aggregation_name: str, dataset: str='cifar1
             raise ValueError(f"Aggregation name {aggregation_name} not supported")
 
 
-def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, target_label: int, id_adversarial_clients: List[int]) -> None:
+# def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, target_label: int, id_adversarial_clients: List[int]) -> None:
+#     # for base then we don't need to set any attack configs
+#     config['client_attacks'] = []
+#
+#     if attack_type.lower() == "badnets":
+#         badnets_config = {
+#             '28': {
+#                 'trigger_height': 4,
+#                 'trigger_width': 4,
+#             },
+#             '32': {
+#                 'trigger_height': 5,
+#                 'trigger_width': 5,
+#             },
+#             '64': {
+#                 'trigger_height': 9,
+#                 'trigger_width': 9,
+#             }
+#         }
+#         input_dim = DATASET_CONFIGS[dataset]['data_shape'][1] # width/height of the dataset
+#         trigger_config = badnets_config[str(input_dim)]
+#         config['client_attacks'].append({
+#             'name': 'BadNetsAttack',
+#             'trigger_height': trigger_config['trigger_height'],
+#             'trigger_width': trigger_config['trigger_width'],
+#             'trigger_pattern': 'square',
+#             'target_class': target_label,
+#             'poison_ratio': 0.5,
+#             'apply_to_client_ids': id_adversarial_clients,
+#         })
+#     elif attack_type.lower() == "sinusoidal":
+#         config['client_attacks'].append({
+#             'name': 'SinusoidalAttack',
+#             'target_class': target_label,
+#             'sine_amplitude': 0.2,
+#             'sine_frequency': 4.0,
+#             'sine_phase': 0.0,
+#             'sine_orientation': 'horizontal',  # or 'vertical' # or 'single'
+#             'channel_mode': 'all',             # RGB or grayscale
+#             'poison_ratio': 0.5,
+#             'apply_to_client_ids': id_adversarial_clients,
+#         })
+#     elif attack_type.lower() == "blended":
+#         config['client_attacks'].append({
+#             'name': 'BlendedAttack',
+#             'target_class': target_label,
+#             'blend_alpha': 0.1,
+#             'poison_ratio': 0.5,
+#             'apply_to_client_ids': id_adversarial_clients,
+#         })
+#     elif attack_type.lower() == "dba":
+#         # DBA trigger parameters based on dataset input dimensions (horizontal triggers)
+#         # https://github.com/AI-secure/DBA/blob/master/utils/cifar_params.yaml
+#         DBA_TRIGGER_CONFIGS = {
+#             '28': {  # MNIST, FashionMNIST, FEMNIST
+#                 'trigger_height': 1,   # Horizontal: height < width
+#                 'trigger_width': 4,
+#                 'trigger_gap': 2,
+#             },
+#             '32': {  # CIFAR10, CIFAR100, GTSRB
+#                 'trigger_height': 1,   # Horizontal: height < width
+#                 'trigger_width': 6,
+#                 'trigger_gap': 3,
+#             },
+#             '64': {  # TinyImageNet
+#                 'trigger_height': 2,   # Horizontal: height < width
+#                 'trigger_width': 10,
+#                 'trigger_gap': 2,
+#             }
+#         }
+#         input_dim = DATASET_CONFIGS[dataset]['data_shape'][1]
+#
+#         # Get trigger parameters for this dataset
+#         trigger_config = DBA_TRIGGER_CONFIGS[str(input_dim)]
+#         config['client_attacks'].append({
+#             'name': 'DBAAttack',
+#             'target_class': target_label,
+#             'trigger_num': len(id_adversarial_clients),
+#             'trigger_height': trigger_config['trigger_height'],
+#             'trigger_width': trigger_config['trigger_width'],
+#             'trigger_gap': trigger_config['trigger_gap'],
+#             'trigger_shift': 0,
+#             'poison_ratio': 0.5,
+#             'apply_to_client_ids': id_adversarial_clients,
+#             'use_global_backdoor': False,
+#         })
+#     else:
+#         raise ValueError(f"Attack type {attack_type} not supported")
+
+def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, target_label: int,
+                               id_adversarial_clients: List[int]) -> None:
     # for base then we don't need to set any attack configs
     config['client_attacks'] = []
 
+    input_dim = DATASET_CONFIGS[dataset]['data_shape'][1]  # width/height of the dataset
+
+    # Auto-set trigger dimensions based on input size
+    if input_dim == 28:
+        default_size = 4
+    elif input_dim == 32:
+        default_size = 5
+    elif input_dim == 64:
+        default_size = 9
+    else:
+        default_size = 5
+
     if attack_type.lower() == "badnets":
-        badnets_config = {
-            '28': {
-                'trigger_height': 4,
-                'trigger_width': 4,
-            },
-            '32': {
-                'trigger_height': 5,
-                'trigger_width': 5,
-            },
-            '64': {
-                'trigger_height': 9,
-                'trigger_width': 9,
-            }
-        }
-        input_dim = DATASET_CONFIGS[dataset]['data_shape'][1] # width/height of the dataset
-        trigger_config = badnets_config[str(input_dim)]
         config['client_attacks'].append({
             'name': 'BadNetsAttack',
-            'trigger_height': trigger_config['trigger_height'],
-            'trigger_width': trigger_config['trigger_width'],
+            'trigger_height': default_size,
+            'trigger_width': default_size,
             'trigger_pattern': 'square',
             'target_class': target_label,
+            'poison_ratio': 0.5,
+            'apply_to_client_ids': id_adversarial_clients,
+        })
+    elif attack_type.lower() == "neurotoxin":
+        config['client_attacks'].append({
+            'name': 'NeurotoxinAttack',
+            'target_class': target_label,
+            'topk_ratio': 0.1,
+            'norm_threshold': 0.2,
+            'trigger_position': 'bottom-right',
+            'trigger_height': default_size,
+            'trigger_width': default_size,
+            'poison_ratio': 0.5,
+            'apply_to_client_ids': id_adversarial_clients,
+        })
+    elif attack_type.lower() == "feddare":
+        config['client_attacks'].append({
+            'name': 'FedDAREAttack',
+            'target_class': target_label,
+            'drop_rate': 0.99,
+            'trigger_height': default_size,
+            'trigger_width': default_size,
+            'poison_ratio': 0.5,
+            'apply_to_client_ids': id_adversarial_clients,
+        })
+    elif attack_type.lower() == "modelreplacement":
+        config['client_attacks'].append({
+            'name': 'ModelReplacementAttack',
+            'target_class': target_label,
+            'scaling_factor': 50,
+            'alpha': 0.5,
+            'trigger_position': 'bottom-right',
+            'trigger_height': default_size,
+            'trigger_width': default_size,
+            'poison_ratio': 0.5,
+            'apply_to_client_ids': id_adversarial_clients,
+        })
+    elif attack_type.lower() == "threedfed":
+        config['client_attacks'].append({
+            'name': 'ThreeDFedAttack',
+            'target_class': target_label,
+            'scaling_factor': 1.0,
+            'use_norm_clipping': True,
+            'trigger_position': 'bottom-right',
+            'trigger_height': default_size,
+            'trigger_width': default_size,
+            'poison_ratio': 0.5,
+            'apply_to_client_ids': id_adversarial_clients,
+        })
+    elif attack_type.lower() == "edgecase":
+        config['client_attacks'].append({
+            'name': 'EdgeCaseBackdoorAttack',
+            'target_class': target_label,
+            'dataset_name': dataset,
+            'data_root': './data',
+            'epsilon': 0.25 if dataset.lower() in ['mnist', 'fashionmnist'] else 0.083,
+            'projection_type': 'l_2',
+            'PGD_attack': True,
+            'scaling_attack': True,
+            'scaling_factor': 50,
+            'l2_proj_frequency': 1,
+            'poison_ratio': 0.5,
+            'apply_to_client_ids': id_adversarial_clients,
+        })
+    elif attack_type.lower() == "labelflipping":
+        config['client_attacks'].append({
+            'name': 'LabelFlippingAttack',
+            'attack_model': 'targeted',
+            'source_label': (target_label + 1) % DATASET_CONFIGS[dataset]['num_classes'],
+            'target_label': target_label,
+            'num_classes': DATASET_CONFIGS[dataset]['num_classes'],
             'poison_ratio': 0.5,
             'apply_to_client_ids': id_adversarial_clients,
         })
@@ -379,8 +536,8 @@ def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, tar
             'sine_amplitude': 0.2,
             'sine_frequency': 4.0,
             'sine_phase': 0.0,
-            'sine_orientation': 'horizontal',  # or 'vertical' # or 'single'
-            'channel_mode': 'all',             # RGB or grayscale
+            'sine_orientation': 'horizontal',
+            'channel_mode': 'all',
             'poison_ratio': 0.5,
             'apply_to_client_ids': id_adversarial_clients,
         })
@@ -393,28 +550,11 @@ def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, tar
             'apply_to_client_ids': id_adversarial_clients,
         })
     elif attack_type.lower() == "dba":
-        # DBA trigger parameters based on dataset input dimensions (horizontal triggers)
-        # https://github.com/AI-secure/DBA/blob/master/utils/cifar_params.yaml
         DBA_TRIGGER_CONFIGS = {
-            '28': {  # MNIST, FashionMNIST, FEMNIST
-                'trigger_height': 1,   # Horizontal: height < width
-                'trigger_width': 4,
-                'trigger_gap': 2,
-            },
-            '32': {  # CIFAR10, CIFAR100, GTSRB
-                'trigger_height': 1,   # Horizontal: height < width
-                'trigger_width': 6,
-                'trigger_gap': 3,
-            },
-            '64': {  # TinyImageNet
-                'trigger_height': 2,   # Horizontal: height < width
-                'trigger_width': 10,
-                'trigger_gap': 2,
-            }
+            '28': {'trigger_height': 1, 'trigger_width': 4, 'trigger_gap': 2},
+            '32': {'trigger_height': 1, 'trigger_width': 6, 'trigger_gap': 3},
+            '64': {'trigger_height': 2, 'trigger_width': 10, 'trigger_gap': 2}
         }
-        input_dim = DATASET_CONFIGS[dataset]['data_shape'][1]
-        
-        # Get trigger parameters for this dataset
         trigger_config = DBA_TRIGGER_CONFIGS[str(input_dim)]
         config['client_attacks'].append({
             'name': 'DBAAttack',
@@ -430,7 +570,6 @@ def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, tar
         })
     else:
         raise ValueError(f"Attack type {attack_type} not supported")
-
 
 def set_fl_attack_clients(config: dict, attack_type: str, num_clients: int, start_attack_round: int, stop_attack_round: int, attack_frequency: int, num_rounds: int):
     config['federated_learning']['num_rounds'] = num_rounds
@@ -581,7 +720,8 @@ def generate_fully_adv_attack_configs(base_config_path: str, attack_type: str, o
                                                     set_dataset_normalization_and_optimizer(config, dataset, opt)
                                                     set_fl_aggregation(config, aggregation, dataset)
 
-                                                    if attack_type in ["badnets", "sinusoidal", "blended", "dba"]:
+                                                    # if attack_type in ["badnets", "sinusoidal", "blended", "dba"]:
+                                                    if attack_type not in ["base"]:
                                                         # pattern attack configs (badnets, sinusoidal, blended, dba) and base (clean training without attack)
                                                         set_pattern_attack_configs(config, dataset, attack_type, target_label, id_adversarial_clients)
                                                     suffix = f"{attack_type}_{dataset}_{model_name}_nc_{num_clients}_niid_{alpha_non_iid}_agg_{aggregation}_opt_{opt}_rnds_{num_round}_strnds_{start_round}_nac_{number_adversarial_clients}_atkr_{start_attack_round}_stopr_{stop_attack_round}_atkf_{attack_frequency}_atk_eps_{atk_eps}_latent_dim_{flat_latent_dim}_label_{target_label}"
@@ -598,7 +738,11 @@ def generate_fully_adv_attack_configs(base_config_path: str, attack_type: str, o
 def main() -> None:
     parser = argparse.ArgumentParser(description='Generate attack config files')
     parser.add_argument('--base', required=True, help='Base config file path')
-    parser.add_argument('--attack', nargs='+', choices=['base', 'sinusoidal', 'badnets', 'blended', 'dba'], required=True, help='Which attack(s) to generate (can specify multiple)')
+    # parser.add_argument('--attack', nargs='+', choices=['base', 'sinusoidal', 'badnets', 'blended', 'dba'], required=True, help='Which attack(s) to generate (can specify multiple)')
+    parser.add_argument('--attack', nargs='+',
+                        choices=['base', 'sinusoidal', 'badnets', 'blended', 'dba', 'neurotoxin', 'feddare',
+                                 'modelreplacement', 'threedfed', 'edgecase', 'labelflipping'], required=True,
+                        help='Which attack(s) to generate (can specify multiple)')
     parser.add_argument('--output', default='configs/generated-v3', help='Output directory')
     parser.add_argument('--dataset', nargs='+', type=str, default=['cifar10'], help='Dataset names for normalization and experiment naming')
     parser.add_argument('--aggregation', nargs='+', type=str, default=['FedAvg'], help='Aggregation names for base') # all means testing all aggregation methods, otherwise testing with FedAvg
