@@ -1535,6 +1535,77 @@ class DBAAttack(BaseAttack):
     
     def get_data_type(self) -> str:
         return "image"
+
+
+class FedDAREAttack(BaseAttack):
+    """
+    FedDARE Attack: Drop-And-REscale for extreme sparse model poisoning.
+    Data poisoning uses a standard static trigger (like BadNets).
+    Model poisoning drops p% of the update and rescales the rest by 1/(1-p).
+    """
+
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+
+        self.target_class = config.get('target_class', 0)
+        self.drop_rate = config.get('drop_rate', 0.99)  # 默认丢弃 99% 的梯度参数
+
+        # 触发器设置 (复用 BadNets 的右下角白块)
+        input_dim = config.get('input_dim', 32)
+        default_size = 5 if input_dim >= 32 else 4
+        self.trigger_height = config.get('trigger_height', default_size)
+        self.trigger_width = config.get('trigger_width', default_size)
+
+    def get_data_type(self) -> str:
+        return "image"
+
+    def _apply_static_trigger(self, poisoned_data: torch.Tensor, poisoned_labels: torch.Tensor,
+                              poison_indices: torch.Tensor) -> None:
+        """植入后门触发器 (数据投毒阶段)"""
+        _, h, w = poisoned_data.shape[1], poisoned_data.shape[2], poisoned_data.shape[3]
+
+        row_start = h - self.trigger_height
+        row_end = h
+        col_start = w - self.trigger_width
+        col_end = w
+
+        # 植入白色触发器并将标签翻转为 target_class
+        poisoned_data[poison_indices, :, row_start:row_end, col_start:col_end] = 1.0
+        poisoned_labels[poison_indices] = self.target_class
+
+    def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
+                              global_model_state: Dict[str, torch.Tensor],
+                              algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
+        """
+        FedDARE 核心逻辑: 掩码稀疏化 + 能量重缩放 (模型投毒阶段)
+        """
+        dare_state = {}
+        scale_factor = 1.0 / (1.0 - self.drop_rate)
+
+        with torch.no_grad():
+            for key in local_model_state.keys():
+                # 跳过 BatchNorm 的统计层参数
+                if 'num_batches_tracked' in key:
+                    dare_state[key] = local_model_state[key].clone()
+                    continue
+
+                local_param = local_model_state[key]
+                global_param = global_model_state.get(key, local_param.clone())
+
+                # 1. 计算原始恶意更新量 (Delta W)
+                update = local_param - global_param
+
+                # 2. 生成同维度的独立伯努利掩码 (0 或 1)
+                # torch.rand_like 生成 [0,1) 的均匀分布，大于 drop_rate 的部分置为 1 (存活)
+                mask = (torch.rand_like(update) > self.drop_rate).float()
+
+                # 3. DARE 核心操作：丢弃 + 缩放放大
+                dare_update = update * mask * scale_factor
+
+                # 4. 加回全局模型，构造最终上传的恶意模型权重
+                dare_state[key] = global_param + dare_update
+
+        return dare_state
     
 
 def create_attack(attack_config: Dict[str, Any]) -> BaseAttack:
@@ -1559,5 +1630,7 @@ def create_attack(attack_config: Dict[str, Any]) -> BaseAttack:
         return EdgeCaseBackdoorAttack(attack_config)
     elif attack_name == 'ThreeDFedAttack':
         return ThreeDFedAttack(attack_config)
+    elif attack_name == 'FedDAREAttack':
+        return FedDAREAttack(attack_config)
     else:
         raise ValueError(f"Unknown attack: {attack_name}")
