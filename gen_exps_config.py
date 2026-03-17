@@ -584,10 +584,21 @@ def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, tar
             'apply_to_client_ids': id_adversarial_clients,
             'use_global_backdoor': False,
         })
+    # elif attack_type.lower() == "layerwisepoisoning":
+    #     config['client_attacks'].append({
+    #         'name': 'LayerwisePoisoningAttack',
+    #         'bc_layers': ['layer4', 'linear', 'fc'],
+    #         'lambda_val': 2.0,
+    #         'trigger_height': default_size,
+    #         'trigger_width': default_size,
+    #         'poison_ratio': 0.5,
+    #         'target_class': target_label,
+    #         'apply_to_client_ids': id_adversarial_clients,
+    #     })
     elif attack_type.lower() == "layerwisepoisoning":
         config['client_attacks'].append({
             'name': 'LayerwisePoisoningAttack',
-            'bc_layers': ['layer4', 'linear', 'fc'],
+            'bc_layer_ratio': 0.1,  # <-- 新增：自动搜寻对后门最敏感的前 10% 的层
             'lambda_val': 2.0,
             'trigger_height': default_size,
             'trigger_width': default_size,
@@ -650,7 +661,7 @@ List[str]:
     # alpha_non_iid_list = [0.1, 0.2, 1.0, 5.0, 10.0]
     # start_rounds = [400] # 500 0
     start_rounds = [0]  # 500 0
-    num_rounds_training = [200]  # 600 # 200
+    num_rounds_training = [100]  # 600 # 200
     optimizers = ["Adam", "SGD"]
     check_optim_dataset = {
         "SGD": ['mnist', 'fashionmnist'],

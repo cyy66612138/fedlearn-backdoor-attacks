@@ -1644,40 +1644,139 @@ class FedDAREAttack(BaseAttack):
         return poisoned_state
 
 
+# class LayerwisePoisoningAttack(BadNetsAttack):
+#     """
+#     Implementation of the Layer-wise Poisoning (LP) attack from the paper:
+#     'BACKDOOR FEDERATED LEARNING BY POISONING BACKDOOR-CRITICAL LAYERS'
+#
+#     This attack identifies Backdoor-Critical (BC) layers and only uploads
+#     poisoned updates for those specific layers. For non-BC layers, it uploads
+#     the clean global model parameters (zero-delta) to maintain high stealthiness
+#     and bypass distance-based or similarity-based anomaly detection.
+#     """
+#
+#     def __init__(self, config: Dict[str, Any]):
+#         super().__init__(config)
+#         # Default BC layers for ResNet18 (e.g., the last block and fully connected layer)
+#         self.bc_layers = config.get('bc_layers', ['layer4', 'linear', 'fc'])
+#         self.lambda_val = config.get('lambda_val', 2.0)  # Scaling factor for BC layers
+#
+#     def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
+#                               global_model_state: Dict[str, torch.Tensor],
+#                               algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
+#
+#         poisoned_state = {}
+#
+#         # Calculate normal bounds to safely scale if necessary
+#         raw_squared_sum = 0.0
+#         for key in local_model_state.keys():
+#             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
+#                 continue
+#             delta = local_model_state[key].float() - global_model_state[key].float()
+#             raw_squared_sum += torch.sum(delta ** 2).item()
+#         estimated_benign_norm = (raw_squared_sum ** 0.5)
+#         max_allowed_norm = estimated_benign_norm * 1.5
+#
+#         # Poison only the BC layers
+#         poisoned_deltas = {}
+#         poisoned_squared_sum = 0.0
+#
+#         for key in local_model_state.keys():
+#             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
+#                 continue
+#
+#             delta = local_model_state[key].float() - global_model_state[key].float()
+#
+#             # Check if this layer is a Backdoor-Critical (BC) layer
+#             is_bc_layer = any(bc_name in key for bc_name in self.bc_layers)
+#
+#             if is_bc_layer:
+#                 # [核心逻辑]: 仅对 BC 层投毒并放大 (lambda_val)
+#                 p_delta = delta * self.lambda_val
+#             else:
+#                 # [核心逻辑]: 非 BC 层伪装为正常 (返回0更新)
+#                 # 论文中提到非关键层使用正常模型参数平均值填充。由于客户端无法获取其他人的更新，
+#                 # 返回原始全局模型参数(即0更新)是最完美的隐蔽策略。
+#                 p_delta = torch.zeros_like(delta)
+#
+#             poisoned_deltas[key] = p_delta
+#             poisoned_squared_sum += torch.sum(p_delta ** 2).item()
+#
+#         poisoned_norm = (poisoned_squared_sum ** 0.5)
+#
+#         # 自适应裁剪 (Adaptive scaling to evade detection)
+#         clip_rate = 1.0
+#         if poisoned_norm > max_allowed_norm and poisoned_norm > 0:
+#             clip_rate = max_allowed_norm / poisoned_norm
+#
+#         # Reconstruct the model
+#         for key in local_model_state.keys():
+#             if key not in poisoned_deltas:
+#                 poisoned_state[key] = local_model_state[key]
+#             else:
+#                 final_delta = poisoned_deltas[key] * clip_rate
+#                 poisoned_state[key] = (global_model_state[key].float() + final_delta).to(local_model_state[key].dtype)
+#
+#         return poisoned_state
+
 class LayerwisePoisoningAttack(BadNetsAttack):
     """
     Implementation of the Layer-wise Poisoning (LP) attack from the paper:
     'BACKDOOR FEDERATED LEARNING BY POISONING BACKDOOR-CRITICAL LAYERS'
 
-    This attack identifies Backdoor-Critical (BC) layers and only uploads
-    poisoned updates for those specific layers. For non-BC layers, it uploads
-    the clean global model parameters (zero-delta) to maintain high stealthiness
-    and bypass distance-based or similarity-based anomaly detection.
+    动态寻找 Backdoor-Critical (BC) 层：
+    通过评估本地后门训练后各层的更新量范数（Norm），自动挑选更新最剧烈的前 K 层作为 BC 层，
+    仅对这些层进行放大投毒，其余层返回 0 更新以维持隐蔽性。
     """
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        # Default BC layers for ResNet18 (e.g., the last block and fully connected layer)
-        self.bc_layers = config.get('bc_layers', ['layer4', 'linear', 'fc'])
-        self.lambda_val = config.get('lambda_val', 2.0)  # Scaling factor for BC layers
+        # 废弃固定的 bc_layers，改为按比例或指定数量动态选取
+        # 默认选取更新范数最大的前 10% 的参数矩阵作为 BC 层
+        self.bc_layer_ratio = config.get('bc_layer_ratio', 0.1)
+        self.num_bc_layers = config.get('num_bc_layers', None)  # 也可以在 YAML 中直接指定具体层数 (例如 6)
+        self.lambda_val = config.get('lambda_val', 2.0)
 
     def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
                               global_model_state: Dict[str, torch.Tensor],
                               algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
 
         poisoned_state = {}
-
-        # Calculate normal bounds to safely scale if necessary
+        layer_updates = {}
+        layer_norms = {}
         raw_squared_sum = 0.0
+
+        # 1. 计算所有层的本地更新量 (Delta W) 及其 L2 范数
         for key in local_model_state.keys():
+            # 跳过 BN 层的统计特征
             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
                 continue
+
             delta = local_model_state[key].float() - global_model_state[key].float()
-            raw_squared_sum += torch.sum(delta ** 2).item()
+            layer_updates[key] = delta
+
+            # 使用范数来衡量该层对后门任务的“敏感度/关键度”
+            norm = torch.norm(delta, p=2).item()
+            layer_norms[key] = norm
+            raw_squared_sum += norm ** 2
+
         estimated_benign_norm = (raw_squared_sum ** 0.5)
         max_allowed_norm = estimated_benign_norm * 1.5
 
-        # Poison only the BC layers
+        # 2. 动态定位 Backdoor-Critical (BC) 层
+        # 按照各层更新量的大小进行降序排序
+        sorted_layers = sorted(layer_norms.items(), key=lambda x: x[1], reverse=True)
+
+        # 决定要选择的 BC 层数量 (K)
+        if self.num_bc_layers is not None:
+            k = self.num_bc_layers
+        else:
+            k = max(1, int(len(layer_norms) * self.bc_layer_ratio))
+
+        # 提取 Top-K 最敏感的层名作为 BC 层
+        bc_layers_keys = set([layer[0] for layer in sorted_layers[:k]])
+
+        # 3. 针对性执行层级投毒 (Layer-wise Poisoning)
         poisoned_deltas = {}
         poisoned_squared_sum = 0.0
 
@@ -1685,18 +1784,13 @@ class LayerwisePoisoningAttack(BadNetsAttack):
             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
                 continue
 
-            delta = local_model_state[key].float() - global_model_state[key].float()
+            delta = layer_updates[key]
 
-            # Check if this layer is a Backdoor-Critical (BC) layer
-            is_bc_layer = any(bc_name in key for bc_name in self.bc_layers)
-
-            if is_bc_layer:
-                # [核心逻辑]: 仅对 BC 层投毒并放大 (lambda_val)
+            if key in bc_layers_keys:
+                # [核心逻辑]: 关键层 -> 放大后门更新，植入恶意特征
                 p_delta = delta * self.lambda_val
             else:
-                # [核心逻辑]: 非 BC 层伪装为正常 (返回0更新)
-                # 论文中提到非关键层使用正常模型参数平均值填充。由于客户端无法获取其他人的更新，
-                # 返回原始全局模型参数(即0更新)是最完美的隐蔽策略。
+                # [核心逻辑]: 非关键层 -> 强行掩码清零，骗过相似度检测 (如 FoolsGold)
                 p_delta = torch.zeros_like(delta)
 
             poisoned_deltas[key] = p_delta
@@ -1704,12 +1798,12 @@ class LayerwisePoisoningAttack(BadNetsAttack):
 
         poisoned_norm = (poisoned_squared_sum ** 0.5)
 
-        # 自适应裁剪 (Adaptive scaling to evade detection)
+        # 4. 自适应裁剪 (防止范数超标被服务器截断)
         clip_rate = 1.0
         if poisoned_norm > max_allowed_norm and poisoned_norm > 0:
             clip_rate = max_allowed_norm / poisoned_norm
 
-        # Reconstruct the model
+        # 5. 重构并封装最终要上传的欺骗性模型参数
         for key in local_model_state.keys():
             if key not in poisoned_deltas:
                 poisoned_state[key] = local_model_state[key]
