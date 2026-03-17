@@ -1643,6 +1643,82 @@ class FedDAREAttack(BaseAttack):
 
         return poisoned_state
 
+
+class LayerwisePoisoningAttack(BadNetsAttack):
+    """
+    Implementation of the Layer-wise Poisoning (LP) attack from the paper:
+    'BACKDOOR FEDERATED LEARNING BY POISONING BACKDOOR-CRITICAL LAYERS'
+
+    This attack identifies Backdoor-Critical (BC) layers and only uploads
+    poisoned updates for those specific layers. For non-BC layers, it uploads
+    the clean global model parameters (zero-delta) to maintain high stealthiness
+    and bypass distance-based or similarity-based anomaly detection.
+    """
+
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        # Default BC layers for ResNet18 (e.g., the last block and fully connected layer)
+        self.bc_layers = config.get('bc_layers', ['layer4', 'linear', 'fc'])
+        self.lambda_val = config.get('lambda_val', 2.0)  # Scaling factor for BC layers
+
+    def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
+                              global_model_state: Dict[str, torch.Tensor],
+                              algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
+
+        poisoned_state = {}
+
+        # Calculate normal bounds to safely scale if necessary
+        raw_squared_sum = 0.0
+        for key in local_model_state.keys():
+            if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
+                continue
+            delta = local_model_state[key].float() - global_model_state[key].float()
+            raw_squared_sum += torch.sum(delta ** 2).item()
+        estimated_benign_norm = (raw_squared_sum ** 0.5)
+        max_allowed_norm = estimated_benign_norm * 1.5
+
+        # Poison only the BC layers
+        poisoned_deltas = {}
+        poisoned_squared_sum = 0.0
+
+        for key in local_model_state.keys():
+            if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
+                continue
+
+            delta = local_model_state[key].float() - global_model_state[key].float()
+
+            # Check if this layer is a Backdoor-Critical (BC) layer
+            is_bc_layer = any(bc_name in key for bc_name in self.bc_layers)
+
+            if is_bc_layer:
+                # [核心逻辑]: 仅对 BC 层投毒并放大 (lambda_val)
+                p_delta = delta * self.lambda_val
+            else:
+                # [核心逻辑]: 非 BC 层伪装为正常 (返回0更新)
+                # 论文中提到非关键层使用正常模型参数平均值填充。由于客户端无法获取其他人的更新，
+                # 返回原始全局模型参数(即0更新)是最完美的隐蔽策略。
+                p_delta = torch.zeros_like(delta)
+
+            poisoned_deltas[key] = p_delta
+            poisoned_squared_sum += torch.sum(p_delta ** 2).item()
+
+        poisoned_norm = (poisoned_squared_sum ** 0.5)
+
+        # 自适应裁剪 (Adaptive scaling to evade detection)
+        clip_rate = 1.0
+        if poisoned_norm > max_allowed_norm and poisoned_norm > 0:
+            clip_rate = max_allowed_norm / poisoned_norm
+
+        # Reconstruct the model
+        for key in local_model_state.keys():
+            if key not in poisoned_deltas:
+                poisoned_state[key] = local_model_state[key]
+            else:
+                final_delta = poisoned_deltas[key] * clip_rate
+                poisoned_state[key] = (global_model_state[key].float() + final_delta).to(local_model_state[key].dtype)
+
+        return poisoned_state
+
 def create_attack(attack_config: Dict[str, Any]) -> BaseAttack:
     """Factory function to create attack instances"""
     attack_name = attack_config['name']
@@ -1667,5 +1743,7 @@ def create_attack(attack_config: Dict[str, Any]) -> BaseAttack:
         return ThreeDFedAttack(attack_config)
     elif attack_name == 'FedDAREAttack':
         return FedDAREAttack(attack_config)
+    elif attack_name == 'LayerwisePoisoningAttack':
+        return LayerwisePoisoningAttack(attack_config)
     else:
         raise ValueError(f"Unknown attack: {attack_name}")

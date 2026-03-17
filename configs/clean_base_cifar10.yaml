@@ -1,0 +1,65 @@
+experiment:
+  name: clean_base_cifar10_resnet18
+  description: "Pre-training a clean global model on CIFAR-10 as a base for future attacks."
+  seed: 42
+  debug: false
+  tags:
+  - federated
+  - clean_base
+  - pretrain
+
+gpu:
+  id: 0
+
+dataset:
+  name: cifar10
+  type: image
+  data_root: ./data
+  partition_type: non_iid
+  alpha: 0.5
+  num_classes: 10
+  mean: [0.4914, 0.4822, 0.4465]
+  std: [0.247, 0.2435, 0.2616]
+  data_shape: [3, 32, 32]
+
+model:
+  name: resnet18
+  weights: ''             # 留空，代表从头开始随机初始化
+  resume_training: false
+
+federated_learning:
+  num_clients: 100
+  min_data_per_client: 100
+  max_data_per_client: 100000
+  participation_rate: 0.1
+  num_rounds: 300         # 训练  轮干净模型
+  local_epochs: 2
+  batch_size: 128
+  learning_rate: 0.001
+  optimizer: Adam
+  weight_decay: 0.0001
+  attack_frequency: 0     # 【关键】设为 0，完全关闭攻击
+
+adversarial_clients: []   # 【关键】清空恶意节点名单
+client_attacks: []        # 【关键】清空攻击配置
+
+server_aggregation:
+  - name: FedAvg          # 纯净训练用最基础的 FedAvg 即可
+
+server_defenses: []
+
+evaluation:
+  test_frequency: 1
+  batch_size: 256
+  metrics:
+  - accuracy
+  - loss
+  backdoor_evaluation: false # 没投毒，不需要测后门
+
+logging:
+  use_wandb: false
+  save_checkpoints: true     # 【关键】必须开启保存
+  checkpoint_dir: ./checkpoints/clean_base
+  checkpoint_frequency: 300  # 设为 ，只在最后一轮保存一次即可
+  save_results_dir: ./results/clean_base
+  visualize_dir: ./visualizations/clean_base

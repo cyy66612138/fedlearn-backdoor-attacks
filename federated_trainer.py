@@ -39,7 +39,18 @@ class FederatedTrainer:
             print(f"🔍 Attempting to load checkpoint: {checkpoint_path}")
         else:
             print(f"🔄 No checkpoint specified, starting from scratch")
+        # start_round = self.framework.setup_experiment(None, test_loader, client_datasets, checkpoint_path)
+        # print(f"📌 Starting training from round {start_round}")
         start_round = self.framework.setup_experiment(None, test_loader, client_datasets, checkpoint_path)
+
+        # ADDED: 检查是否仅初始化权重而不继承保存的轮次
+        resume_training = self.config['model'].get('resume_training', False)
+        if checkpoint_path and not resume_training:
+            print(f"\n💡 Only initializing model weights from checkpoint. Round counter reset to 0.")
+            print(
+                f"   (Tip: set `resume_training: true` in your yaml under `model` if you want to continue from the saved round)\n")
+            start_round = 0  # 强行将时间线清零
+
         print(f"📌 Starting training from round {start_round}")
         
         print("=" * 60)
