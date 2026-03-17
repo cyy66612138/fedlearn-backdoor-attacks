@@ -669,7 +669,8 @@ List[str]:
                 custom_models[dataset][model][
                     400] = f"./checkpoints/base/base_{dataset}_{model}_rnds_2000_opt_{opt}__round_400.pth"
                 # custom_models[dataset][model][500] = f"./checkpoints/base/base_{dataset}_{model}_rnds_2000_opt_{opt}__round_500.pth"
-                custom_models[dataset][model][0] = ""
+                # custom_models[dataset][model][0] = ""
+                custom_models[dataset][model][0] = "./checkpoints/clean_base/clean_base_cifar10_resnet18__round_300.pth"
                 custom_models[dataset][model][
                     'yaml'] = f"./configs/generated/base/base_{dataset}_{model}_rnds_2000_opt_{opt}.yaml"
 

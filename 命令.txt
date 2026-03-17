@@ -1,5 +1,7 @@
 source fl_env/bin/activate
 
+python run_exps_tmux.py --commands-file commands-v3.txt --session attack_exps --force --attach --show-cmd --stay-open
+
 tmux attach -t lp_feddare_exps
 
 nvidia-smi
