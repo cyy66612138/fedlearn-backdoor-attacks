@@ -109,6 +109,8 @@ class FLClient:
         # Load global model weights
         with torch.no_grad():
             self.model.load_state_dict(global_model.state_dict())
+            # === 新增：保存一份全局模型的副本（CPU上），供后续模型投毒对比使用 ===
+            self.global_model_state = {k: v.cpu().clone() for k, v in global_model.state_dict().items()}
             # self.model = self.model.to(self.device)
         
         # print l2 norm of the global model and local model
@@ -238,6 +240,21 @@ class FLClient:
             model_cpu = self.model.cpu()
             model_state = model_cpu.state_dict()
             del model_cpu
+
+            # === 新增：在此处拦截，执行模型投毒（梯度掩码、缩放等） ===
+            if has_active_attack:
+                for attack in self.attacks:
+                    apply_to_client_ids = attack.config.get('apply_to_client_ids', [])
+                    if attack and self.client_id in apply_to_client_ids and attack.should_apply(round_idx):
+                        # 获取当前的聚合算法名称 (如 FedAvg)
+                        agg_algo = self.config.get('server_aggregation', [{'name': 'FedAvg'}])[0]['name']
+
+                        # 调用攻击类中的模型投毒方法，篡改最终要上传的 model_state
+                        model_state = attack.apply_model_poisoning(
+                            local_model_state=model_state,
+                            global_model_state=self.global_model_state,
+                            algorithm=agg_algo
+                        )
         
         result = {
             'model_state': model_state,
@@ -262,6 +279,12 @@ class FLClient:
             self.model.cpu()
             del self.model
             self.model = None
+
+         # === 新增：清理全局副本 ===
+        if hasattr(self, 'global_model_state'):
+            del self.global_model_state
+
+
         
         if self.optimizer is not None:
             del self.optimizer

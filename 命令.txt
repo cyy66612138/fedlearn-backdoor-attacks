@@ -1,0 +1,9 @@
+source fl_env/bin/activate
+
+tmux attach -t lp_feddare_exps
+
+nvidia-smi
+
+tmux kill-session -t lp_feddare_exps
+
+ps -u chenyang -f | grep python

@@ -773,7 +773,8 @@ def main() -> None:
 
     # Use relative path and standard venv activation
     project_root = os.path.dirname(os.path.abspath(__file__))
-    pattern_str = f'cd {project_root} && source .venv/bin/activate && stdbuf -oL -eL python -u run_federated.py --config configs/blended.yaml --gpu 7 2>&1 | stdbuf -oL -eL tee logs/blended.log'
+    # pattern_str = f'cd {project_root} && source .venv/bin/activate && stdbuf -oL -eL python -u run_federated.py --config configs/blended.yaml --gpu 7 2>&1 | stdbuf -oL -eL tee logs/blended.log'
+    pattern_str = f'cd {project_root} && source fl_env/bin/activate && stdbuf -oL -eL python -u run_federated.py --config configs/blended.yaml --gpu 7 2>&1 | stdbuf -oL -eL tee logs/blended.log'
     output_file = './commands-v3.txt'
     with open(output_file, 'a') as f:
         f.write(f"=="*30 + '\n')

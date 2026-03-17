@@ -1814,9 +1814,19 @@ class FoolsGoldAggregation(BaseAggregation):
         # Pardoning
         wv = self._pardoning(S)
 
+        # # Weighted aggregate of CURRENT updates U (not historical sum)
+        # wv_tensor = torch.from_numpy(wv.astype('float32')).to(U.device).unsqueeze(1)
+        # gm = (wv_tensor * U).sum(dim=0) if float(wv_tensor.sum().item()) > 0 else U.mean(dim=0)
         # Weighted aggregate of CURRENT updates U (not historical sum)
         wv_tensor = torch.from_numpy(wv.astype('float32')).to(U.device).unsqueeze(1)
-        gm = (wv_tensor * U).sum(dim=0) if float(wv_tensor.sum().item()) > 0 else U.mean(dim=0)
+
+        # === 修复 Bug：必须对权重进行归一化，否则会造成梯度成倍爆炸 ===
+        weight_sum = float(wv_tensor.sum().item())
+        if weight_sum > 0:
+            wv_tensor = wv_tensor / weight_sum  # 归一化权重使其和为1
+            gm = (wv_tensor * U).sum(dim=0)
+        else:
+            gm = U.mean(dim=0)
 
         # Unflatten and apply to global model
         with torch.no_grad():

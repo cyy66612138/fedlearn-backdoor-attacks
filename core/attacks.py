@@ -1573,40 +1573,75 @@ class FedDAREAttack(BaseAttack):
         poisoned_data[poison_indices, :, row_start:row_end, col_start:col_end] = 1.0
         poisoned_labels[poison_indices] = self.target_class
 
-    def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
-                              global_model_state: Dict[str, torch.Tensor],
-                              algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
+    # def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
+    #                           global_model_state: Dict[str, torch.Tensor],
+    #                           algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
+    #     """
+    #     FedDARE 核心逻辑: 掩码稀疏化 + 能量重缩放 (模型投毒阶段)
+    #     """
+    #     dare_state = {}
+    #     scale_factor = 1.0 / (1.0 - self.drop_rate)
+    #
+    #     with torch.no_grad():
+    #         for key in local_model_state.keys():
+    #             # 跳过 BatchNorm 的统计层参数
+    #             if 'num_batches_tracked' in key:
+    #                 dare_state[key] = local_model_state[key].clone()
+    #                 continue
+    #
+    #             local_param = local_model_state[key]
+    #             global_param = global_model_state.get(key, local_param.clone())
+    #
+    #             # 1. 计算原始恶意更新量 (Delta W)
+    #             update = local_param - global_param
+    #
+    #             # 2. 生成同维度的独立伯努利掩码 (0 或 1)
+    #             # torch.rand_like 生成 [0,1) 的均匀分布，大于 drop_rate 的部分置为 1 (存活)
+    #             mask = (torch.rand_like(update) > self.drop_rate).float()
+    #
+    #             # 3. DARE 核心操作：丢弃 + 缩放放大
+    #             dare_update = update * mask * scale_factor
+    #
+    #             # 4. 加回全局模型，构造最终上传的恶意模型权重
+    #             dare_state[key] = global_param + dare_update
+    #
+    #     return dare_state
+    def apply_model_poisoning(self, local_model_state, global_model_state, algorithm="FedAvg"):
         """
-        FedDARE 核心逻辑: 掩码稀疏化 + 能量重缩放 (模型投毒阶段)
+        正确的 FedDARE 模型投毒：只放大 Delta (更新量)，且保证绝对安全
         """
-        dare_state = {}
-        scale_factor = 1.0 / (1.0 - self.drop_rate)
+        poisoned_state = {}
 
-        with torch.no_grad():
-            for key in local_model_state.keys():
-                # 跳过 BatchNorm 的统计层参数
-                if 'num_batches_tracked' in key:
-                    dare_state[key] = local_model_state[key].clone()
-                    continue
+        # 计算缩放系数 (例如 drop_rate=0.9, 则放大 10 倍)
+        scale_factor = 1.0 / (1.0 - self.drop_rate + 1e-8)
 
-                local_param = local_model_state[key]
-                global_param = global_model_state.get(key, local_param.clone())
+        for key in local_model_state.keys():
+            # 跳过 Batch Normalization 的追踪统计量（放大它们必死无疑）
+            if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
+                poisoned_state[key] = local_model_state[key]
+                continue
 
-                # 1. 计算原始恶意更新量 (Delta W)
-                update = local_param - global_param
+            # 1. 计算真实的增量 Delta
+            delta = local_model_state[key].float() - global_model_state[key].float()
 
-                # 2. 生成同维度的独立伯努利掩码 (0 或 1)
-                # torch.rand_like 生成 [0,1) 的均匀分布，大于 drop_rate 的部分置为 1 (存活)
-                mask = (torch.rand_like(update) > self.drop_rate).float()
+            # 2. 生成与 Delta 形状相同的随机掩码 (Drop)
+            # 大于 drop_rate 的设为 1 (保留)，小于的设为 0 (丢弃)
+            mask = (torch.rand_like(delta) > self.drop_rate).float()
 
-                # 3. DARE 核心操作：丢弃 + 缩放放大
-                dare_update = update * mask * scale_factor
+            # 3. 对 Delta 进行掩码并重缩放 (Rescale)
+            poisoned_delta = delta * mask * scale_factor
 
-                # 4. 加回全局模型，构造最终上传的恶意模型权重
-                dare_state[key] = global_param + dare_update
+            # [安全锁] 防止单层梯度过大导致 NaN (截断极大值)
+            # 这也是对抗服务器范数裁剪 (Norm Clipping) 的关键一步
+            # max_delta_norm = 5.0  # 设定一个安全的阈值，你可以根据情况调整
+            # current_norm = torch.norm(poisoned_delta)
+            # if current_norm > max_delta_norm:
+            #     poisoned_delta = poisoned_delta * (max_delta_norm / (current_norm + 1e-8))
 
-        return dare_state
-    
+            # 4. 将投毒后的 Delta 加回全局模型，得到最终要上传的欺骗性参数
+            poisoned_state[key] = (global_model_state[key].float() + poisoned_delta).to(local_model_state[key].dtype)
+
+        return poisoned_state
 
 def create_attack(attack_config: Dict[str, Any]) -> BaseAttack:
     """Factory function to create attack instances"""
