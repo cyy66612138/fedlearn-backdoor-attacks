@@ -1,7 +1,29 @@
 """
 Aggregation methods for federated learning
 """
+# ==============================================================================
+# 🟢 【终极拦截】必须放在文件第 1 行！在加载任何其他库之前拦截 scikit-learn
+# ==============================================================================
+import sklearn.utils.validation
+import sklearn.utils
 
+_original_check_array = sklearn.utils.validation.check_array
+
+def _patched_check_array(*args, **kwargs):
+    if 'force_all_finite' in kwargs:
+        kwargs['ensure_all_finite'] = kwargs.pop('force_all_finite')
+    return _original_check_array(*args, **kwargs)
+
+# 暴力覆盖 sklearn 内部所有的 check_array 引用点
+sklearn.utils.validation.check_array = _patched_check_array
+sklearn.utils.check_array = _patched_check_array
+# ==============================================================================
+
+# 下面才是你原本的 imports
+# import numpy as np
+# import torch
+# import hdbscan
+# ... (其余代码保持不变)
 import torch
 import torch.nn as nn
 from typing import Dict, Any, List
@@ -13,6 +35,29 @@ import random
 from sklearn.cluster import KMeans, DBSCAN, MeanShift
 from sklearn.cluster import estimate_bandwidth
 
+# ==============================================================================
+# 🟢 【Hotfix】解决 scikit-learn 1.3+ 版本废弃 force_all_finite 导致的 FLAME/HDBSCAN 报错
+# ==============================================================================
+import sklearn.utils.validation as validation
+import sklearn.metrics.pairwise as pairwise
+
+# 1. 拦截并修复 check_array
+original_check_array = validation.check_array
+def patched_check_array(*args, **kwargs):
+    if 'force_all_finite' in kwargs:
+        # 将被废弃的 force_all_finite 替换为新版的 ensure_all_finite
+        kwargs['ensure_all_finite'] = kwargs.pop('force_all_finite')
+    return original_check_array(*args, **kwargs)
+validation.check_array = patched_check_array
+
+# 2. 拦截并修复 cosine_distances (如果在 FLAME 中直接调用了)
+original_cosine_distances = pairwise.cosine_distances
+def patched_cosine_distances(X, Y=None, **kwargs):
+    if 'force_all_finite' in kwargs:
+        kwargs.pop('force_all_finite')  # 新版直接移除了该参数，安全丢弃
+    return original_cosine_distances(X, Y, **kwargs)
+pairwise.cosine_distances = patched_cosine_distances
+# ==============================================================================
 
 def compute_l2_distance(state_dict1, state_dict2):
     # Create a list of flattened tensors of the difference between each layer
@@ -688,20 +733,89 @@ class CRFLAggregation(BaseAggregation):
         global_model.load_state_dict(global_state)
         return global_model
 
+# class KrumLikeAggregation(BaseAggregation):
+#     """
+#     [Machine Learning with Adversaries: Byzantine Tolerant Gradient Descent](https://papers.nips.cc/paper_files/paper/2017/hash/f4b9ec30ad9f68f89b29639786cb62ef-Abstract.html) - NeurIPS '17
+#     Multi-Krum is a variant of Krum that selects the m updates with the smallest scores, rather than just the single update chosen by Krum, where the score is the sum of the n-f-1 smallest Euclidean distances to the other updates. Then it verages these selected updates to produce the final aggregated update.
+#     """
+#     def __init__(self, config):
+#         super().__init__(config)
+#         self.name = config.get('name', self.__class__.__name__) # Krum or MultiKrum
+#         # if name is MultiKrum, then avg_percentage is the percentage of clients to be selected for averaging (set = 0.2)
+#         # else then select avg_percentage as the number of clients to be selected for averaging (set = 1)
+#         self.params = config.get('params', {})
+#         self.f = int(self.params.get('f', 0)) # number of Byzantine clients
+#         # avg_percentage = 1 => Krum, avg_percentage = 0.2 (< 1) => MultiKrum
+#         self.avg_percentage = float(self.params.get('avg_percentage', 0.2))
+#
+#     def _pairwise_sq_dists(self, vectors):
+#         X = torch.stack(vectors).float()
+#         xx = (X * X).sum(dim=1, keepdim=True)
+#         return (xx + xx.t() - 2 * (X @ X.t())).clamp_min(0)
+#
+#     def aggregate(self, global_model, client_results, round_num):
+#         if not client_results:
+#             return global_model
+#         n = len(client_results)
+#         f = min(self.f, max(0, n - 2))
+#         # m: absolute or percentage
+#         m = max(1, int(self.avg_percentage * n)) if self.avg_percentage < 1 else int(self.avg_percentage)
+#         # m = 1 => Krum, m < 1 => MultiKrum (get partial of clients)
+#         # print(f"🔍 KrumLikeAggregation: m: {m} avg_percentage: {self.avg_percentage}")
+#         model_keys = list(client_results[0]['model_state'].keys())
+#         global_state = global_model.state_dict()
+#         snapshot = {k: v.clone().detach().float() for k, v in global_state.items()}
+#
+#         updates = []
+#         for cr in client_results:
+#             flat = []
+#             for k in model_keys:
+#                 flat.append((cr['model_state'][k].detach().float() - snapshot[k]).view(-1))
+#             updates.append(torch.cat(flat))
+#
+#         dists = self._pairwise_sq_dists(updates)
+#         scores = []
+#         for i in range(n):
+#             # Exclude self-distance (zero) and take the (n-f-2) closest others
+#             sorted_row = torch.sort(dists[i])[0]
+#             num_closest = max(1, n - f - 2)
+#             vals = sorted_row[1:num_closest + 1]
+#             scores.append(vals.sum())
+#         order = torch.argsort(torch.stack(scores))[:m]
+#         print(f"🔍 KrumLikeAggregation: order: {order}")
+#
+#         if m == 1:
+#             chosen = updates[int(order[0])]
+#         else:
+#             # Weighted average by num_examples of selected clients
+#             selected_indices = [int(i) for i in order]
+#             selected_updates = [updates[idx] for idx in selected_indices]
+#             selected_weights = [float(client_results[idx]['samples']) for idx in selected_indices]
+#             weight_sum = sum(selected_weights) if sum(selected_weights) > 0 else 1.0
+#             normalized = [w / weight_sum for w in selected_weights]
+#             stacked_sel = torch.stack(selected_updates)
+#             weights_tensor = torch.tensor(normalized, dtype=stacked_sel.dtype, device=stacked_sel.device).unsqueeze(1)
+#             chosen = (weights_tensor * stacked_sel).sum(dim=0)
+#         # if using mean aggregation, then use the following code
+#         # chosen = updates[int(order[0])] if m == 1 else torch.stack([updates[int(i)] for i in order]).mean(dim=0)
+#         with torch.no_grad():
+#             offset = 0
+#             for key in model_keys:
+#                 numel = snapshot[key].numel()
+#                 delta = chosen[offset:offset + numel].view_as(snapshot[key])
+#                 offset += numel
+#                 global_state[key].add_(delta.to(global_state[key].dtype))
+#         global_model.load_state_dict(global_state)
+#         return global_model
+
+
 class KrumLikeAggregation(BaseAggregation):
-    """
-    [Machine Learning with Adversaries: Byzantine Tolerant Gradient Descent](https://papers.nips.cc/paper_files/paper/2017/hash/f4b9ec30ad9f68f89b29639786cb62ef-Abstract.html) - NeurIPS '17
-    Multi-Krum is a variant of Krum that selects the m updates with the smallest scores, rather than just the single update chosen by Krum, where the score is the sum of the n-f-1 smallest Euclidean distances to the other updates. Then it verages these selected updates to produce the final aggregated update.
-    """
     def __init__(self, config):
         super().__init__(config)
-        self.name = config.get('name', self.__class__.__name__) # Krum or MultiKrum
-        # if name is MultiKrum, then avg_percentage is the percentage of clients to be selected for averaging (set = 0.2)
-        # else then select avg_percentage as the number of clients to be selected for averaging (set = 1)
+        self.name = config.get('name', self.__class__.__name__)
         self.params = config.get('params', {})
-        self.f = int(self.params.get('f', 0)) # number of Byzantine clients
-        # avg_percentage = 1 => Krum, avg_percentage = 0.2 (< 1) => MultiKrum
-        self.avg_percentage = float(self.params.get('avg_percentage', 0.2))  
+        self.f = int(self.params.get('f', 0))
+        self.avg_percentage = float(self.params.get('avg_percentage', 0.2))
 
     def _pairwise_sq_dists(self, vectors):
         X = torch.stack(vectors).float()
@@ -713,10 +827,8 @@ class KrumLikeAggregation(BaseAggregation):
             return global_model
         n = len(client_results)
         f = min(self.f, max(0, n - 2))
-        # m: absolute or percentage
         m = max(1, int(self.avg_percentage * n)) if self.avg_percentage < 1 else int(self.avg_percentage)
-        # m = 1 => Krum, m < 1 => MultiKrum (get partial of clients)
-        # print(f"🔍 KrumLikeAggregation: m: {m} avg_percentage: {self.avg_percentage}")
+
         model_keys = list(client_results[0]['model_state'].keys())
         global_state = global_model.state_dict()
         snapshot = {k: v.clone().detach().float() for k, v in global_state.items()}
@@ -731,7 +843,6 @@ class KrumLikeAggregation(BaseAggregation):
         dists = self._pairwise_sq_dists(updates)
         scores = []
         for i in range(n):
-            # Exclude self-distance (zero) and take the (n-f-2) closest others
             sorted_row = torch.sort(dists[i])[0]
             num_closest = max(1, n - f - 2)
             vals = sorted_row[1:num_closest + 1]
@@ -739,10 +850,13 @@ class KrumLikeAggregation(BaseAggregation):
         order = torch.argsort(torch.stack(scores))[:m]
         print(f"🔍 KrumLikeAggregation: order: {order}")
 
+        # ======= 【新增代码】记录本次被选中的客户端 ID =======
+        self.last_accepted_clients = [client_results[int(i)].get('client_id', -1) for i in order]
+        # ===================================================
+
         if m == 1:
             chosen = updates[int(order[0])]
         else:
-            # Weighted average by num_examples of selected clients
             selected_indices = [int(i) for i in order]
             selected_updates = [updates[idx] for idx in selected_indices]
             selected_weights = [float(client_results[idx]['samples']) for idx in selected_indices]
@@ -751,8 +865,7 @@ class KrumLikeAggregation(BaseAggregation):
             stacked_sel = torch.stack(selected_updates)
             weights_tensor = torch.tensor(normalized, dtype=stacked_sel.dtype, device=stacked_sel.device).unsqueeze(1)
             chosen = (weights_tensor * stacked_sel).sum(dim=0)
-        # if using mean aggregation, then use the following code
-        # chosen = updates[int(order[0])] if m == 1 else torch.stack([updates[int(i)] for i in order]).mean(dim=0)
+
         with torch.no_grad():
             offset = 0
             for key in model_keys:
@@ -1146,61 +1259,110 @@ class FlameAggregation(BaseAggregation):
                 tensor.add_(noise.to(tensor.dtype))
             model.load_state_dict(state)
 
+    # def aggregate(self, global_model: nn.Module, client_results: List[Dict], round_num: int) -> nn.Module:
+    #     if not client_results:
+    #         return global_model
+    #
+    #     # print l2 norm of the global model
+    #     global_model_params = list(global_model.parameters())
+    #     global_model_norm = torch.norm(torch.cat([p.view(-1) for p in global_model_params]), p=2)
+    #     print(f"🔍 FlameAggregation: before clustering, global_model_norm: {global_model_norm}")
+    #
+    #     model_keys = list(client_results[0]['model_state'].keys())
+    #     global_state = global_model.state_dict()
+    #     snapshot = {k: v.clone().detach().float() for k, v in global_state.items()}
+    #
+    #     # print id of all clients
+    #     print(f"🔍 FlameAggregation: client_id: {[cr['client_id'] for cr in client_results]}")
+    #     # Build per-client flat model/gradient updates (same here as deltas)
+    #     updates = []
+    #     for cr in client_results:
+    #         updates.append(self._stack_updates(model_keys, snapshot, cr['model_state']))
+    #     U = torch.stack(updates)  # [n, P]
+    #
+    #     # HDBSCAN clustering on cosine distances over model updates
+    #     try:
+    #         import hdbscan  # type: ignore
+    #     except Exception as e:
+    #         raise ImportError("hdbscan is required for FlameAggregation") from e
+    #     X = U.detach().cpu().numpy().astype(np.float64)
+    #     cluster = hdbscan.HDBSCAN(metric="cosine", algorithm="generic",
+    #                               min_cluster_size=max(2, U.size(0)//2+1), min_samples=1, allow_single_cluster=True)
+    #     cluster.fit(X)
+    #     benign_idx = [idx for idx, label in enumerate(cluster.labels_) if label == 0]
+    #     if len(benign_idx) == 0:
+    #         benign_idx = list[int](range(U.size(0)))
+    #
+    #     print(f"🔍 FlameAggregation: benign_idx: {benign_idx} and cluster.labels_: {cluster.labels_}")
+    #     # import IPython; IPython.embed();
+    #     # Median L2 norm across all clients
+    #     norms = torch.norm(U, p=2, dim=1)
+    #     median_norm = float(torch.median(norms).item())
+    #     print(f"🔍 FlameAggregation: median_norm: {median_norm} and norms: {norms}")
+    #
+    #     # Clip benign gradients by median norm, then average
+    #     clipped = self._normclip(U[benign_idx], median_norm)
+    #     agg_grad = clipped.mean(dim=0)
+    #     # print(f"🔍 FlameAggregation: U[benign_idx].shape: {U[benign_idx].shape}")
+    #     # Big question: why filter out all attacks client but the backdoor accuracy is still high?
+    #     # 10 clients:  [3, 14, 81, 94, 29, 74, 95, 42, 86, 65]
+    #     # first four are adversarial clients: [3, 14, 81, 94]
+    #     # last six are benign clients: [29, 74, 95, 42, 86, 65]
+    #     # cluster.labels_: array([-1, -1, -1, -1,  0,  0,  0,  0,  0,  0])
+    #     # so why the backdoor accuracy is still high?
+    #     # because the benign clients are still able to learn the backdoor?
+    #     # or because the adversarial clients are not able to learn the backdoor?
+    #     # or because the adversarial clients are not able to learn the backdoor?
+    #     # Apply aggregated update
+    #     with torch.no_grad():
+    #         offset = 0
+    #         for key in model_keys:
+    #             numel = snapshot[key].numel()
+    #             delta = agg_grad[offset:offset + numel].view_as(snapshot[key])
+    #             offset += numel
+    #             global_state[key].add_(delta.to(global_state[key].dtype))
+    #     global_model.load_state_dict(global_state)
+    #
+    #     # Add DP-like Gaussian noise scaled by gamma * median_norm
+    #     self._add_noise_to_model(global_model, self.gamma * median_norm)
+    #     # print l2 norm of the global model
+    #     global_model_params = list(global_model.parameters())
+    #     global_model_norm = torch.norm(torch.cat([p.view(-1) for p in global_model_params]), p=2)
+    #     print(f"🔍 FlameAggregation: after adding noise, global_model_norm: {global_model_norm}")
+    #     return global_model
     def aggregate(self, global_model: nn.Module, client_results: List[Dict], round_num: int) -> nn.Module:
         if not client_results:
             return global_model
-        
-        # print l2 norm of the global model
-        global_model_params = list(global_model.parameters())
-        global_model_norm = torch.norm(torch.cat([p.view(-1) for p in global_model_params]), p=2)
-        print(f"🔍 FlameAggregation: before clustering, global_model_norm: {global_model_norm}")
 
         model_keys = list(client_results[0]['model_state'].keys())
         global_state = global_model.state_dict()
         snapshot = {k: v.clone().detach().float() for k, v in global_state.items()}
 
-        # print id of all clients
-        print(f"🔍 FlameAggregation: client_id: {[cr['client_id'] for cr in client_results]}")
-        # Build per-client flat model/gradient updates (same here as deltas)
         updates = []
         for cr in client_results:
             updates.append(self._stack_updates(model_keys, snapshot, cr['model_state']))
-        U = torch.stack(updates)  # [n, P]
+        U = torch.stack(updates)
 
-        # HDBSCAN clustering on cosine distances over model updates
-        try:
-            import hdbscan  # type: ignore
-        except Exception as e:
-            raise ImportError("hdbscan is required for FlameAggregation") from e
+        import hdbscan
+        import numpy as np
         X = U.detach().cpu().numpy().astype(np.float64)
         cluster = hdbscan.HDBSCAN(metric="cosine", algorithm="generic",
-                                  min_cluster_size=max(2, U.size(0)//2+1), min_samples=1, allow_single_cluster=True)
+                                  min_cluster_size=max(2, U.size(0) // 2 + 1), min_samples=1, allow_single_cluster=True)
         cluster.fit(X)
         benign_idx = [idx for idx, label in enumerate(cluster.labels_) if label == 0]
         if len(benign_idx) == 0:
             benign_idx = list[int](range(U.size(0)))
-        
-        print(f"🔍 FlameAggregation: benign_idx: {benign_idx} and cluster.labels_: {cluster.labels_}")
-        # import IPython; IPython.embed();
-        # Median L2 norm across all clients
+
+        # ======= 【新增代码】记录本次被选中的客户端 ID =======
+        self.last_accepted_clients = [client_results[i].get('client_id', -1) for i in benign_idx]
+        # ===================================================
+
         norms = torch.norm(U, p=2, dim=1)
         median_norm = float(torch.median(norms).item())
-        print(f"🔍 FlameAggregation: median_norm: {median_norm} and norms: {norms}")
-        
-        # Clip benign gradients by median norm, then average
+
         clipped = self._normclip(U[benign_idx], median_norm)
         agg_grad = clipped.mean(dim=0)
-        # print(f"🔍 FlameAggregation: U[benign_idx].shape: {U[benign_idx].shape}")
-        # Big question: why filter out all attacks client but the backdoor accuracy is still high?
-        # 10 clients:  [3, 14, 81, 94, 29, 74, 95, 42, 86, 65]
-        # first four are adversarial clients: [3, 14, 81, 94]
-        # last six are benign clients: [29, 74, 95, 42, 86, 65]
-        # cluster.labels_: array([-1, -1, -1, -1,  0,  0,  0,  0,  0,  0])
-        # so why the backdoor accuracy is still high?
-        # because the benign clients are still able to learn the backdoor?
-        # or because the adversarial clients are not able to learn the backdoor?
-        # or because the adversarial clients are not able to learn the backdoor?
-        # Apply aggregated update
+
         with torch.no_grad():
             offset = 0
             for key in model_keys:
@@ -1210,12 +1372,7 @@ class FlameAggregation(BaseAggregation):
                 global_state[key].add_(delta.to(global_state[key].dtype))
         global_model.load_state_dict(global_state)
 
-        # Add DP-like Gaussian noise scaled by gamma * median_norm
         self._add_noise_to_model(global_model, self.gamma * median_norm)
-        # print l2 norm of the global model
-        global_model_params = list(global_model.parameters())
-        global_model_norm = torch.norm(torch.cat([p.view(-1) for p in global_model_params]), p=2)
-        print(f"🔍 FlameAggregation: after adding noise, global_model_norm: {global_model_norm}")
         return global_model
 
 
@@ -1760,6 +1917,241 @@ class BulyanAggregation(BaseAggregation):
         return global_model
 
 
+# class FoolsGoldAggregation(BaseAggregation):
+#     """FoolsGold: downweight highly similar client updates (sybil-resistant)."""
+#
+#     def __init__(self, config: Dict[str, Any]):
+#         super().__init__(config)
+#         self.params = config.get('params', {})
+#         self.epsilon = float(self.params.get('epsilon', 1.0e-6))
+#         self.topk_ratio = float(self.params.get('topk_ratio', 0.1))
+#         self.checkpoints: List[torch.Tensor] = []  # history of normalized updates per round
+#
+#     def aggregate(self, global_model: nn.Module, client_results: List[Dict], round_num: int) -> nn.Module:
+#         if not client_results:
+#             return global_model
+#
+#         model_keys = list(client_results[0]['model_state'].keys())
+#         global_state = global_model.state_dict()
+#         snapshot = {k: v.clone().detach().float() for k, v in global_state.items()}
+#
+#         # Build current round flat deltas
+#         updates_list: List[torch.Tensor] = []
+#         for cr in client_results:
+#             flat = []
+#             for k in model_keys:
+#                 flat.append((cr['model_state'][k].detach().float() - snapshot[k]).view(-1))
+#             updates_list.append(torch.cat(flat))
+#         U = torch.stack(updates_list)  # [n, P]
+#
+#         # 1) Normalize each client's update (cap norm at 1) and record historical gradients
+#         norms = torch.norm(U, p=2, dim=1, keepdim=True)
+#         U_normed = U.clone()
+#         mask = norms.squeeze(1) > 1
+#         if mask.any():
+#             U_normed[mask] = U_normed[mask] / norms[mask]
+#         # store a CPU numpy snapshot for history accumulation (aligning with FLPoison)
+#         self.checkpoints.append(U_normed.detach().cpu())
+#         # Sum historical gradients across rounds
+#         sumed_updates = torch.stack(self.checkpoints, dim=0).sum(dim=0)  # [n, P]
+#
+#         # 2) Indicative features mask from last layer of global model (optional)
+#         feature_dim = U.size(1)
+#         indicative_mask = self._build_indicative_mask_from_model(global_model, feature_dim)  # torch.bool [P]
+#
+#         # 3) Cosine similarity over indicative features; remove self-similarity
+#         X = sumed_updates.to(U.device)
+#         X_sel = X[:, indicative_mask]
+#         denom = torch.norm(X_sel, p=2, dim=1, keepdim=True).clamp(min=self.epsilon)
+#         Xu = X_sel / denom
+#         S = Xu @ Xu.t()
+#         n = S.size(0)
+#         S = S - torch.eye(n, dtype=S.dtype, device=S.device)
+#
+#         # Pardoning
+#         wv = self._pardoning(S)
+#
+#         # # Weighted aggregate of CURRENT updates U (not historical sum)
+#         # wv_tensor = torch.from_numpy(wv.astype('float32')).to(U.device).unsqueeze(1)
+#         # gm = (wv_tensor * U).sum(dim=0) if float(wv_tensor.sum().item()) > 0 else U.mean(dim=0)
+#         # Weighted aggregate of CURRENT updates U (not historical sum)
+#         wv_tensor = torch.from_numpy(wv.astype('float32')).to(U.device).unsqueeze(1)
+#
+#         # === 修复 Bug：必须对权重进行归一化，否则会造成梯度成倍爆炸 ===
+#         weight_sum = float(wv_tensor.sum().item())
+#         if weight_sum > 0:
+#             wv_tensor = wv_tensor / weight_sum  # 归一化权重使其和为1
+#             gm = (wv_tensor * U).sum(dim=0)
+#         else:
+#             gm = U.mean(dim=0)
+#
+#         # Unflatten and apply to global model
+#         with torch.no_grad():
+#             offset = 0
+#             for key in model_keys:
+#                 numel = snapshot[key].numel()
+#                 delta = gm[offset:offset + numel].view_as(snapshot[key])
+#                 offset += numel
+#                 global_state[key].add_(delta.to(global_state[key].dtype))
+#         global_model.load_state_dict(global_state)
+#         return global_model
+#
+#     def _pardoning(self, cos_dist: torch.Tensor):
+#         cos = cos_dist.detach().cpu().numpy()
+#         max_cs = np.max(cos, axis=1) + self.epsilon
+#         for i in range(cos.shape[0]):
+#             for j in range(cos.shape[1]):
+#                 if i == j:
+#                     continue
+#                 if max_cs[i] < max_cs[j]:
+#                     cos[i, j] *= max_cs[i] / max_cs[j]
+#         wv = 1.0 - np.max(cos, axis=1)
+#         wv = np.clip(wv, 0.0, 1.0)
+#         mx = np.max(wv)
+#         if mx > 0:
+#             wv = wv / mx
+#         wv[wv == 1.0] = 0.99
+#         # Logit shaping
+#         wv = np.log(wv / (1.0 - wv) + self.epsilon) + 0.5
+#         wv[(~np.isfinite(wv)) | (wv > 1.0)] = 1.0
+#         wv[wv < 0.0] = 0.0
+#         return wv
+#
+#     def _build_indicative_mask_from_model(self, model: nn.Module, feature_dim: int) -> torch.Tensor:
+#         # Try to find the last linear layer weight of shape [C, D]
+#         last_w = None
+#         for name, param in model.named_parameters():
+#             if param.dim() == 2:
+#                 last_w = param.detach().float()
+#         if last_w is None:
+#             return torch.ones(feature_dim, dtype=torch.bool)
+#         class_dim, ol_feature_dim = last_w.size(0), last_w.size(1)
+#         topk = max(1, int(class_dim * self.topk_ratio))
+#         ol_indicative_idx = torch.zeros((class_dim, ol_feature_dim), dtype=torch.bool)
+#         # per-class top-k by absolute value
+#         vals, idxs = torch.topk(last_w.abs(), k=topk, dim=1)
+#         for i in range(class_dim):
+#             ol_indicative_idx[i, idxs[i]] = True
+#         flat = ol_indicative_idx.view(-1)
+#         # Pad at the front to align with end-positioned output layer params
+#         if flat.numel() >= feature_dim:
+#             return torch.ones(feature_dim, dtype=torch.bool)
+#         pad_len = feature_dim - flat.numel()
+#         mask = torch.cat([torch.zeros(pad_len, dtype=torch.bool), flat], dim=0)
+#         return mask
+
+# class FoolsGoldAggregation(BaseAggregation):
+#     def __init__(self, config: Dict[str, Any]):
+#         super().__init__(config)
+#         self.params = config.get('params', {})
+#         self.epsilon = float(self.params.get('epsilon', 1.0e-6))
+#         self.topk_ratio = float(self.params.get('topk_ratio', 0.1))
+#         self.checkpoints: List[torch.Tensor] = []
+#
+#     def aggregate(self, global_model: nn.Module, client_results: List[Dict], round_num: int) -> nn.Module:
+#         if not client_results:
+#             return global_model
+#
+#         model_keys = list(client_results[0]['model_state'].keys())
+#         global_state = global_model.state_dict()
+#         snapshot = {k: v.clone().detach().float() for k, v in global_state.items()}
+#
+#         updates_list: List[torch.Tensor] = []
+#         for cr in client_results:
+#             flat = []
+#             for k in model_keys:
+#                 flat.append((cr['model_state'][k].detach().float() - snapshot[k]).view(-1))
+#             updates_list.append(torch.cat(flat))
+#         U = torch.stack(updates_list)
+#
+#         norms = torch.norm(U, p=2, dim=1, keepdim=True)
+#         U_normed = U.clone()
+#         mask = norms.squeeze(1) > 1
+#         if mask.any():
+#             U_normed[mask] = U_normed[mask] / norms[mask]
+#
+#         self.checkpoints.append(U_normed.detach().cpu())
+#         sumed_updates = torch.stack(self.checkpoints, dim=0).sum(dim=0)
+#
+#         feature_dim = U.size(1)
+#         indicative_mask = self._build_indicative_mask_from_model(global_model, feature_dim)
+#
+#         X = sumed_updates.to(U.device)
+#         X_sel = X[:, indicative_mask]
+#         denom = torch.norm(X_sel, p=2, dim=1, keepdim=True).clamp(min=self.epsilon)
+#         Xu = X_sel / denom
+#         S = Xu @ Xu.t()
+#         n = S.size(0)
+#         S = S - torch.eye(n, dtype=S.dtype, device=S.device)
+#
+#         wv = self._pardoning(S)
+#         wv_tensor = torch.from_numpy(wv.astype('float32')).to(U.device).unsqueeze(1)
+#
+#         weight_sum = float(wv_tensor.sum().item())
+#         if weight_sum > 0:
+#             wv_tensor = wv_tensor / weight_sum
+#             gm = (wv_tensor * U).sum(dim=0)
+#         else:
+#             gm = U.mean(dim=0)
+#
+#         # ======= 【新增代码】将权重分配大于 1e-4 的视为“被接受” =======
+#         wv_list = wv_tensor.squeeze().tolist()
+#         if not isinstance(wv_list, list): wv_list = [wv_list]
+#         self.last_accepted_clients = [
+#             client_results[i].get('client_id', -1)
+#             for i, w in enumerate(wv_list) if w > 1e-4
+#         ]
+#         # =============================================================
+#
+#         with torch.no_grad():
+#             offset = 0
+#             for key in model_keys:
+#                 numel = snapshot[key].numel()
+#                 delta = gm[offset:offset + numel].view_as(snapshot[key])
+#                 offset += numel
+#                 global_state[key].add_(delta.to(global_state[key].dtype))
+#         global_model.load_state_dict(global_state)
+#         return global_model
+#
+#     def _pardoning(self, cos_dist: torch.Tensor):
+#         import numpy as np
+#         cos = cos_dist.detach().cpu().numpy()
+#         max_cs = np.max(cos, axis=1) + self.epsilon
+#         for i in range(cos.shape[0]):
+#             for j in range(cos.shape[1]):
+#                 if i == j: continue
+#                 if max_cs[i] < max_cs[j]:
+#                     cos[i, j] *= max_cs[i] / max_cs[j]
+#         wv = 1.0 - np.max(cos, axis=1)
+#         wv = np.clip(wv, 0.0, 1.0)
+#         mx = np.max(wv)
+#         if mx > 0: wv = wv / mx
+#         wv[wv == 1.0] = 0.99
+#         wv = np.log(wv / (1.0 - wv) + self.epsilon) + 0.5
+#         wv[(~np.isfinite(wv)) | (wv > 1.0)] = 1.0
+#         wv[wv < 0.0] = 0.0
+#         return wv
+#
+#     def _build_indicative_mask_from_model(self, model: nn.Module, feature_dim: int) -> torch.Tensor:
+#         last_w = None
+#         for name, param in model.named_parameters():
+#             if param.dim() == 2:
+#                 last_w = param.detach().float()
+#         if last_w is None:
+#             return torch.ones(feature_dim, dtype=torch.bool)
+#         class_dim, ol_feature_dim = last_w.size(0), last_w.size(1)
+#         topk = max(1, int(class_dim * self.topk_ratio))
+#         ol_indicative_idx = torch.zeros((class_dim, ol_feature_dim), dtype=torch.bool)
+#         vals, idxs = torch.topk(last_w.abs(), k=topk, dim=1)
+#         for i in range(class_dim):
+#             ol_indicative_idx[i, idxs[i]] = True
+#         flat = ol_indicative_idx.view(-1)
+#         if flat.numel() >= feature_dim:
+#             return torch.ones(feature_dim, dtype=torch.bool)
+#         pad_len = feature_dim - flat.numel()
+#         mask = torch.cat([torch.zeros(pad_len, dtype=torch.bool), flat], dim=0)
+#         return mask
+
 class FoolsGoldAggregation(BaseAggregation):
     """FoolsGold: downweight highly similar client updates (sybil-resistant)."""
 
@@ -1769,6 +2161,8 @@ class FoolsGoldAggregation(BaseAggregation):
         self.epsilon = float(self.params.get('epsilon', 1.0e-6))
         self.topk_ratio = float(self.params.get('topk_ratio', 0.1))
         self.checkpoints: List[torch.Tensor] = []  # history of normalized updates per round
+        # 新增：用于 Server 层统计 MAR / BAR 的监控名单
+        self.last_accepted_clients = []
 
     def aggregate(self, global_model: nn.Module, client_results: List[Dict], round_num: int) -> nn.Module:
         if not client_results:
@@ -1814,12 +2208,35 @@ class FoolsGoldAggregation(BaseAggregation):
         # Pardoning
         wv = self._pardoning(S)
 
-        # # Weighted aggregate of CURRENT updates U (not historical sum)
-        # wv_tensor = torch.from_numpy(wv.astype('float32')).to(U.device).unsqueeze(1)
-        # gm = (wv_tensor * U).sum(dim=0) if float(wv_tensor.sum().item()) > 0 else U.mean(dim=0)
         # Weighted aggregate of CURRENT updates U (not historical sum)
         wv_tensor = torch.from_numpy(wv.astype('float32')).to(U.device).unsqueeze(1)
 
+        # ==========================================
+        # 🟢 【监控层逻辑修改】：动态相对排名惩罚（倒数前五）
+        # ==========================================
+        # 获取各客户端 ID
+        client_ids = [result.get('client_id', i) for i, result in enumerate(client_results)]
+
+        # 将客户端 ID 与其对应的权重打包
+        wv_list = wv.tolist()
+        client_weights_pair = [(client_ids[i], wv_list[i]) for i in range(len(client_ids))]
+
+        # 按权重从小到大排序
+        client_weights_sorted = sorted(client_weights_pair, key=lambda x: x[1])
+
+        # 找出权重最小的 5 个客户端（使用 min 防御总客户端不足 5 的情况）
+        num_to_reject = min(5, len(client_weights_sorted))
+        rejected_clients = [cid for cid, _ in client_weights_sorted[:num_to_reject]]
+
+        # 更新监控名单（排除权重倒数前五名），专供 Server 统计 MAR/BAR
+        self.last_accepted_clients = [
+            cid for cid, _ in client_weights_pair if cid not in rejected_clients
+        ]
+        # ==========================================
+
+        # ==========================================
+        # 🔴 【物理聚合层逻辑】：保持原版代码不被破坏
+        # ==========================================
         # === 修复 Bug：必须对权重进行归一化，否则会造成梯度成倍爆炸 ===
         weight_sum = float(wv_tensor.sum().item())
         if weight_sum > 0:
@@ -2267,9 +2684,256 @@ class MultiMetricAggregation(BaseAggregation):
         global_model.load_state_dict(global_state)
         return global_model
 
+# class DnCAggregation(BaseAggregation):
+#     """DnC (Divide and Conquer): Robust aggregation using iterative SVD-based filtering.
+#
+#     DnC uses an iterative approach to filter out Byzantine clients:
+#     1. For each iteration:
+#        - Randomly samples a subset of dimensions from client updates
+#        - Computes the mean and centers the updates
+#        - Uses SVD to find the principal component (first right singular vector)
+#        - Scores each client by squared projection on the principal component
+#        - Selects clients with lowest scores (filters out filter_frac * num_byzantine)
+#     2. Takes the intersection of selected clients across all iterations
+#     3. Aggregates only the selected benign clients
+#
+#     This method is from the paper "Manipulating the Byzantine: Optimizing
+#     Model Poisoning Attacks and Defenses for Federated Learning"
+#
+#     Steps per round:
+#       1) Compute client updates (deltas = local - global).
+#       2) For num_iters iterations:
+#          - Sample random subset of dimensions (sub_dim)
+#          - Compute principal component via SVD
+#          - Score clients and filter outliers
+#       3) Take intersection of selected clients across iterations.
+#       4) Aggregate selected clients using weighted average.
+#
+#     Config keys (under params):
+#       - num_byzantine: int (default: None, will be estimated) - number of Byzantine clients
+#       - sub_dim: int (default 10000) - number of dimensions to sample per iteration
+#       - num_iters: int (default 5) - number of filtering iterations
+#       - filter_frac: float (default 1.0) - fraction of byzantine clients to filter per iteration
+#       - byzantine_ratio: float (default 0.1) - ratio to estimate num_byzantine if not provided
+#     """
+#
+#     def __init__(self, config: Dict[str, Any]):
+#         super().__init__(config)
+#         self.params = config.get('params', {})
+#         self.num_byzantine = self.params.get('num_byzantine', None)
+#         self.sub_dim = int(self.params.get('sub_dim', 10000))
+#         self.num_iters = int(self.params.get('num_iters', 5))
+#         self.filter_frac = float(self.params.get('filter_frac', 1.0))
+#         self.byzantine_ratio = float(self.params.get('byzantine_ratio', 0.1))
+#         print(f"🔍 DnCAggregation: num_iters: {self.num_iters}, sub_dim: {self.sub_dim}, filter_frac: {self.filter_frac}")
+#
+#     def _vectorize_updates(self, model_keys: List[str], global_snapshot: Dict[str, torch.Tensor],
+#                           client_states: List[Dict[str, torch.Tensor]]) -> List[torch.Tensor]:
+#         """Vectorize client updates into flat tensors.
+#
+#         Args:
+#             model_keys: List of model parameter keys
+#             global_snapshot: Snapshot of global model state
+#             client_states: List of client model states
+#
+#         Returns:
+#             List of flattened update tensors
+#         """
+#         updates = []
+#         for client_state in client_states:
+#             vec = []
+#             for key in model_keys:
+#                 # Skip batch norm tracking and running stats (matching original)
+#                 if (key.split('.')[-1] == 'num_batches_tracked' or
+#                     key.split('.')[-1] == 'running_mean' or
+#                     key.split('.')[-1] == 'running_var'):
+#                     continue
+#                 delta = client_state[key].detach().float() - global_snapshot[key]
+#                 vec.append(delta.view(-1))
+#             if vec:
+#                 updates.append(torch.cat(vec))
+#             else:
+#                 # If no valid parameters, create empty tensor
+#                 updates.append(torch.tensor([]))
+#         return updates
+#
+#     def _select_benign_clients_iteration(self, updates: List[torch.Tensor],
+#                                          num_byzantine: int,
+#                                          device: torch.device) -> List[int]:
+#         """Select benign clients for one iteration using SVD-based filtering.
+#
+#         Args:
+#             updates: List of flattened update tensors
+#             num_byzantine: Estimated number of Byzantine clients
+#             device: Device to perform computations on
+#
+#         Returns:
+#             List of selected client indices
+#         """
+#         if len(updates) == 0:
+#             return []
+#
+#         # Filter out empty updates
+#         valid_updates = []
+#         valid_indices = []
+#         for idx, upd in enumerate(updates):
+#             if upd.numel() > 0:
+#                 valid_updates.append(upd.to(device))
+#                 valid_indices.append(idx)
+#
+#         if len(valid_updates) == 0:
+#             return []
+#
+#         d = len(valid_updates[0])
+#         if d == 0:
+#             return list(range(len(updates)))
+#
+#         # Sample random subset of dimensions
+#         sub_dim = min(self.sub_dim, d)
+#         indices = torch.randperm(d, device=device)[:sub_dim]
+#
+#         # Extract subset of updates
+#         sub_updates = torch.stack([upd[indices] for upd in valid_updates])
+#
+#         # Compute mean and center updates
+#         mu = sub_updates.mean(dim=0)
+#         centered_updates = sub_updates - mu
+#
+#         # Compute SVD to get principal component
+#         # SVD on centered_updates (shape [num_clients, sub_dim]) returns U, S, V^T
+#         # We want the first right singular vector, which is V^T[0, :] (first row of V^T)
+#         try:
+#             U, S, Vt = torch.linalg.svd(centered_updates, full_matrices=False)
+#             # First right singular vector is the first row of V^T (matching original)
+#             v = Vt[0, :]  # Principal component
+#         except Exception as e:
+#             # If SVD fails, return all clients
+#             print(f"🔍 DnCAggregation: SVD failed: {e}, returning all clients")
+#             return list(range(len(updates)))
+#
+#         # Compute scores: squared dot product with principal component
+#         # Match original: for each update in sub_updates, compute (update - mu) dot v
+#         scores = []
+#         for update in sub_updates:
+#             centered = update - mu
+#             score = (torch.dot(centered, v) ** 2).item()
+#             scores.append(score)
+#
+#         scores = np.array(scores)
+#
+#         # Select clients with lowest scores (filter out filter_frac * num_byzantine)
+#         num_to_filter = int(self.filter_frac * num_byzantine)
+#         num_to_select = max(1, len(valid_updates) - num_to_filter)
+#         good_indices = scores.argsort()[:num_to_select]
+#
+#         # Map back to original indices
+#         selected_indices = [valid_indices[idx] for idx in good_indices]
+#
+#         return selected_indices
+#
+#     def aggregate(self, global_model: nn.Module, client_results: List[Dict],
+#                   round_num: int) -> nn.Module:
+#         """Aggregate client updates using DnC (Divide and Conquer) method."""
+#         if not client_results:
+#             return global_model
+#
+#         model_keys = list(client_results[0]['model_state'].keys())
+#         global_state = global_model.state_dict()
+#         snapshot = {k: v.clone().detach().float() for k, v in global_state.items()}
+#
+#         # Get device from global model
+#         device = next(global_model.parameters()).device
+#
+#         # Vectorize client updates
+#         client_states = [result['model_state'] for result in client_results]
+#         updates = self._vectorize_updates(model_keys, snapshot, client_states)
+#
+#         if len(updates) == 0 or all(upd.numel() == 0 for upd in updates):
+#             return global_model
+#
+#         # Estimate number of Byzantine clients if not provided
+#         num_clients = len(client_results)
+#         if self.num_byzantine is None:
+#             # Estimate based on byzantine_ratio and number of clients
+#             # Original uses: args.frac * args.num_users * 0.1
+#             # Since we don't have frac here, we use byzantine_ratio directly
+#             num_byzantine = max(1, int(self.byzantine_ratio * num_clients))
+#         else:
+#             num_byzantine = int(self.num_byzantine)
+#
+#         num_byzantine = min(num_byzantine, num_clients - 1)  # Can't filter all clients
+#         print(f"🔍 DnCAggregation: num_clients: {num_clients}, estimated num_byzantine: {num_byzantine}")
+#
+#         # Perform multiple iterations and take intersection
+#         benign_ids_list = []
+#         for i in range(self.num_iters):
+#             selected = self._select_benign_clients_iteration(updates, num_byzantine, device)
+#             if selected:
+#                 benign_ids_list.append(set(selected))
+#             else:
+#                 # If selection fails, use all clients for this iteration
+#                 benign_ids_list.append(set(range(num_clients)))
+#
+#         # Take intersection of all iterations
+#         if benign_ids_list:
+#             intersection_set = benign_ids_list[0].copy()
+#             for benign_set in benign_ids_list[1:]:
+#                 intersection_set.intersection_update(benign_set)
+#             benign_ids = sorted(list(intersection_set))
+#         else:
+#             # Fallback: use all clients
+#             benign_ids = list(range(num_clients))
+#
+#         if not benign_ids:
+#             # If intersection is empty, use all clients
+#             print("🔍 DnCAggregation: Warning - intersection is empty, using all clients")
+#             benign_ids = list(range(num_clients))
+#
+#         print(f"🔍 DnCAggregation: selected benign client indices: {benign_ids}")
+#
+#         # Aggregate selected clients using weighted average
+#         selected_results = [client_results[i] for i in benign_ids]
+#         total_samples = sum(result['samples'] for result in selected_results)
+#
+#         if total_samples == 0:
+#             # Fallback: use equal weights
+#             total_samples = len(selected_results)
+#             weights = [1.0 / len(selected_results)] * len(selected_results)
+#         else:
+#             weights = [result['samples'] / total_samples for result in selected_results]
+#
+#         # Prepare aggregated state
+#         aggregated_state = {}
+#         for key in model_keys:
+#             aggregated_state[key] = torch.zeros_like(global_state[key], dtype=torch.float32)
+#
+#         # Weighted aggregation
+#         with torch.no_grad():
+#             for result, weight in zip(selected_results, weights):
+#                 local_state = result['model_state']
+#
+#                 for key in model_keys:
+#                     local_tensor = local_state[key].float()
+#                     aggregated_state[key] += weight * local_tensor
+#
+#             # Apply to global model (cast to original dtype)
+#             for key in model_keys:
+#                 if global_state[key].dtype != aggregated_state[key].dtype:
+#                     aggregated_state[key] = aggregated_state[key].to(global_state[key].dtype)
+#                 global_state[key] = aggregated_state[key]
+#
+#             # Keep batch norm tracking parameters from first selected client
+#             for key in model_keys:
+#                 if key.split('.')[-1] == 'num_batches_tracked':
+#                     if key in selected_results[0]['model_state']:
+#                         global_state[key] = selected_results[0]['model_state'][key]
+#
+#         global_model.load_state_dict(global_state)
+#         return global_model
+
 class DnCAggregation(BaseAggregation):
     """DnC (Divide and Conquer): Robust aggregation using iterative SVD-based filtering.
-    
+
     DnC uses an iterative approach to filter out Byzantine clients:
     1. For each iteration:
        - Randomly samples a subset of dimensions from client updates
@@ -2279,10 +2943,10 @@ class DnCAggregation(BaseAggregation):
        - Selects clients with lowest scores (filters out filter_frac * num_byzantine)
     2. Takes the intersection of selected clients across all iterations
     3. Aggregates only the selected benign clients
-    
+
     This method is from the paper "Manipulating the Byzantine: Optimizing
     Model Poisoning Attacks and Defenses for Federated Learning"
-    
+
     Steps per round:
       1) Compute client updates (deltas = local - global).
       2) For num_iters iterations:
@@ -2291,7 +2955,7 @@ class DnCAggregation(BaseAggregation):
          - Score clients and filter outliers
       3) Take intersection of selected clients across iterations.
       4) Aggregate selected clients using weighted average.
-    
+
     Config keys (under params):
       - num_byzantine: int (default: None, will be estimated) - number of Byzantine clients
       - sub_dim: int (default 10000) - number of dimensions to sample per iteration
@@ -2299,7 +2963,7 @@ class DnCAggregation(BaseAggregation):
       - filter_frac: float (default 1.0) - fraction of byzantine clients to filter per iteration
       - byzantine_ratio: float (default 0.1) - ratio to estimate num_byzantine if not provided
     """
-    
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.params = config.get('params', {})
@@ -2308,17 +2972,18 @@ class DnCAggregation(BaseAggregation):
         self.num_iters = int(self.params.get('num_iters', 5))
         self.filter_frac = float(self.params.get('filter_frac', 1.0))
         self.byzantine_ratio = float(self.params.get('byzantine_ratio', 0.1))
-        print(f"🔍 DnCAggregation: num_iters: {self.num_iters}, sub_dim: {self.sub_dim}, filter_frac: {self.filter_frac}")
-    
+        print(
+            f"🔍 DnCAggregation: num_iters: {self.num_iters}, sub_dim: {self.sub_dim}, filter_frac: {self.filter_frac}")
+
     def _vectorize_updates(self, model_keys: List[str], global_snapshot: Dict[str, torch.Tensor],
-                          client_states: List[Dict[str, torch.Tensor]]) -> List[torch.Tensor]:
+                           client_states: List[Dict[str, torch.Tensor]]) -> List[torch.Tensor]:
         """Vectorize client updates into flat tensors.
-        
+
         Args:
             model_keys: List of model parameter keys
             global_snapshot: Snapshot of global model state
             client_states: List of client model states
-            
+
         Returns:
             List of flattened update tensors
         """
@@ -2327,9 +2992,9 @@ class DnCAggregation(BaseAggregation):
             vec = []
             for key in model_keys:
                 # Skip batch norm tracking and running stats (matching original)
-                if (key.split('.')[-1] == 'num_batches_tracked' or 
-                    key.split('.')[-1] == 'running_mean' or 
-                    key.split('.')[-1] == 'running_var'):
+                if (key.split('.')[-1] == 'num_batches_tracked' or
+                        key.split('.')[-1] == 'running_mean' or
+                        key.split('.')[-1] == 'running_var'):
                     continue
                 delta = client_state[key].detach().float() - global_snapshot[key]
                 vec.append(delta.view(-1))
@@ -2339,23 +3004,23 @@ class DnCAggregation(BaseAggregation):
                 # If no valid parameters, create empty tensor
                 updates.append(torch.tensor([]))
         return updates
-    
-    def _select_benign_clients_iteration(self, updates: List[torch.Tensor], 
-                                         num_byzantine: int, 
+
+    def _select_benign_clients_iteration(self, updates: List[torch.Tensor],
+                                         num_byzantine: int,
                                          device: torch.device) -> List[int]:
         """Select benign clients for one iteration using SVD-based filtering.
-        
+
         Args:
             updates: List of flattened update tensors
             num_byzantine: Estimated number of Byzantine clients
             device: Device to perform computations on
-            
+
         Returns:
             List of selected client indices
         """
         if len(updates) == 0:
             return []
-        
+
         # Filter out empty updates
         valid_updates = []
         valid_indices = []
@@ -2363,25 +3028,25 @@ class DnCAggregation(BaseAggregation):
             if upd.numel() > 0:
                 valid_updates.append(upd.to(device))
                 valid_indices.append(idx)
-        
+
         if len(valid_updates) == 0:
             return []
-        
+
         d = len(valid_updates[0])
         if d == 0:
             return list(range(len(updates)))
-        
+
         # Sample random subset of dimensions
         sub_dim = min(self.sub_dim, d)
         indices = torch.randperm(d, device=device)[:sub_dim]
-        
+
         # Extract subset of updates
         sub_updates = torch.stack([upd[indices] for upd in valid_updates])
-        
+
         # Compute mean and center updates
         mu = sub_updates.mean(dim=0)
         centered_updates = sub_updates - mu
-        
+
         # Compute SVD to get principal component
         # SVD on centered_updates (shape [num_clients, sub_dim]) returns U, S, V^T
         # We want the first right singular vector, which is V^T[0, :] (first row of V^T)
@@ -2393,7 +3058,7 @@ class DnCAggregation(BaseAggregation):
             # If SVD fails, return all clients
             print(f"🔍 DnCAggregation: SVD failed: {e}, returning all clients")
             return list(range(len(updates)))
-        
+
         # Compute scores: squared dot product with principal component
         # Match original: for each update in sub_updates, compute (update - mu) dot v
         scores = []
@@ -2401,39 +3066,39 @@ class DnCAggregation(BaseAggregation):
             centered = update - mu
             score = (torch.dot(centered, v) ** 2).item()
             scores.append(score)
-        
+
         scores = np.array(scores)
-        
+
         # Select clients with lowest scores (filter out filter_frac * num_byzantine)
         num_to_filter = int(self.filter_frac * num_byzantine)
         num_to_select = max(1, len(valid_updates) - num_to_filter)
         good_indices = scores.argsort()[:num_to_select]
-        
+
         # Map back to original indices
         selected_indices = [valid_indices[idx] for idx in good_indices]
-        
+
         return selected_indices
-    
-    def aggregate(self, global_model: nn.Module, client_results: List[Dict], 
+
+    def aggregate(self, global_model: nn.Module, client_results: List[Dict],
                   round_num: int) -> nn.Module:
         """Aggregate client updates using DnC (Divide and Conquer) method."""
         if not client_results:
             return global_model
-        
+
         model_keys = list(client_results[0]['model_state'].keys())
         global_state = global_model.state_dict()
         snapshot = {k: v.clone().detach().float() for k, v in global_state.items()}
-        
+
         # Get device from global model
         device = next(global_model.parameters()).device
-        
+
         # Vectorize client updates
         client_states = [result['model_state'] for result in client_results]
         updates = self._vectorize_updates(model_keys, snapshot, client_states)
-        
+
         if len(updates) == 0 or all(upd.numel() == 0 for upd in updates):
             return global_model
-        
+
         # Estimate number of Byzantine clients if not provided
         num_clients = len(client_results)
         if self.num_byzantine is None:
@@ -2443,10 +3108,10 @@ class DnCAggregation(BaseAggregation):
             num_byzantine = max(1, int(self.byzantine_ratio * num_clients))
         else:
             num_byzantine = int(self.num_byzantine)
-        
+
         num_byzantine = min(num_byzantine, num_clients - 1)  # Can't filter all clients
         print(f"🔍 DnCAggregation: num_clients: {num_clients}, estimated num_byzantine: {num_byzantine}")
-        
+
         # Perform multiple iterations and take intersection
         benign_ids_list = []
         for i in range(self.num_iters):
@@ -2456,7 +3121,7 @@ class DnCAggregation(BaseAggregation):
             else:
                 # If selection fails, use all clients for this iteration
                 benign_ids_list.append(set(range(num_clients)))
-        
+
         # Take intersection of all iterations
         if benign_ids_list:
             intersection_set = benign_ids_list[0].copy()
@@ -2466,51 +3131,55 @@ class DnCAggregation(BaseAggregation):
         else:
             # Fallback: use all clients
             benign_ids = list(range(num_clients))
-        
+
         if not benign_ids:
             # If intersection is empty, use all clients
             print("🔍 DnCAggregation: Warning - intersection is empty, using all clients")
             benign_ids = list(range(num_clients))
-        
+
         print(f"🔍 DnCAggregation: selected benign client indices: {benign_ids}")
-        
+
+        # ============ 【新增代码：把被接受的 ID 暴露给 Server】 ============
+        self.last_accepted_clients = [client_results[i].get('client_id', -1) for i in benign_ids]
+        # ===============================================================
+
         # Aggregate selected clients using weighted average
         selected_results = [client_results[i] for i in benign_ids]
         total_samples = sum(result['samples'] for result in selected_results)
-        
+
         if total_samples == 0:
             # Fallback: use equal weights
             total_samples = len(selected_results)
             weights = [1.0 / len(selected_results)] * len(selected_results)
         else:
             weights = [result['samples'] / total_samples for result in selected_results]
-        
+
         # Prepare aggregated state
         aggregated_state = {}
         for key in model_keys:
             aggregated_state[key] = torch.zeros_like(global_state[key], dtype=torch.float32)
-        
+
         # Weighted aggregation
         with torch.no_grad():
             for result, weight in zip(selected_results, weights):
                 local_state = result['model_state']
-                
+
                 for key in model_keys:
                     local_tensor = local_state[key].float()
                     aggregated_state[key] += weight * local_tensor
-            
+
             # Apply to global model (cast to original dtype)
             for key in model_keys:
                 if global_state[key].dtype != aggregated_state[key].dtype:
                     aggregated_state[key] = aggregated_state[key].to(global_state[key].dtype)
                 global_state[key] = aggregated_state[key]
-            
+
             # Keep batch norm tracking parameters from first selected client
             for key in model_keys:
                 if key.split('.')[-1] == 'num_batches_tracked':
                     if key in selected_results[0]['model_state']:
                         global_state[key] = selected_results[0]['model_state'][key]
-        
+
         global_model.load_state_dict(global_state)
         return global_model
 

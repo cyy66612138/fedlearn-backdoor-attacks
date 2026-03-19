@@ -478,8 +478,8 @@ def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, tar
         config['client_attacks'].append({
             'name': 'NeurotoxinAttack',
             'target_class': target_label,
-            'topk_ratio': 0.1,
-            'norm_threshold': 0.2,
+            'topk_ratio': 0.1,  # 寻找 10% 的休眠神经元
+            'lambda_val': 2.0,  # [新增] 掩码后的能量放大倍数 (代码会自动进行安全裁剪，不用担心超标)
             'trigger_position': 'bottom-right',
             'trigger_height': default_size,
             'trigger_width': default_size,
@@ -598,12 +598,13 @@ def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, tar
     elif attack_type.lower() == "layerwisepoisoning":
         config['client_attacks'].append({
             'name': 'LayerwisePoisoningAttack',
-            'bc_layer_ratio': 0.1,  # <-- 新增：自动搜寻对后门最敏感的前 10% 的层
-            'lambda_val': 2.0,
+            'target_class': target_label,
+            'bc_layer_ratio': 0.05,  # [关键] 只取 BSR 最高的 Top 5% 参数层作为关键层（对 ResNet18 大约是 3 层）
+            'lambda_val': 2.0,  # 针对找出来的 BC 层，把后门更新量放大 2 倍
+            'lsa_bsr_threshold': 0.5,  # LSA 备用安全阈值
             'trigger_height': default_size,
             'trigger_width': default_size,
             'poison_ratio': 0.5,
-            'target_class': target_label,
             'apply_to_client_ids': id_adversarial_clients,
         })
     else:
@@ -692,7 +693,7 @@ List[str]:
     for num_clients in num_clients_list:
 
         # number_adversarial_clients = 0 if attack_type in ["base"] else 4
-        number_adversarial_clients = 4
+        number_adversarial_clients = 10
         id_adversarial_clients = list(
             random.sample(range(num_clients), number_adversarial_clients)) if number_adversarial_clients > 0 else []
         print(
@@ -845,7 +846,8 @@ def main() -> None:
         f.write(f"# {args_str}\n")
         for idx, path in enumerate(path_configs):
             pattern = pattern_str.replace('configs/blended.yaml', path)
-            pattern = pattern.replace('gpu 7', f'gpu {str(3 + int(idx) % 2)}')
+            # ✅ 修改后的代码：对 8 取模，依次分配 0, 1, 2, 3, 4, 5, 6, 7
+            pattern = pattern.replace('gpu 7', f'gpu {str(int(idx) % 8)}')
             log_file = os.path.basename(path).replace('.yaml', '')
             log_file = f'{log_file}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
             attack_type = os.path.basename(path).split('_')[0].lower()

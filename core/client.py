@@ -236,6 +236,25 @@ class FLClient:
         # print(f"Client {self.client_id}: model_norm after training: {model_norm}")
         # print(f"*"*30)
 
+        # with torch.no_grad():
+        #     model_cpu = self.model.cpu()
+        #     model_state = model_cpu.state_dict()
+        #     del model_cpu
+        #
+        #     # === 新增：在此处拦截，执行模型投毒（梯度掩码、缩放等） ===
+        #     if has_active_attack:
+        #         for attack in self.attacks:
+        #             apply_to_client_ids = attack.config.get('apply_to_client_ids', [])
+        #             if attack and self.client_id in apply_to_client_ids and attack.should_apply(round_idx):
+        #                 # 获取当前的聚合算法名称 (如 FedAvg)
+        #                 agg_algo = self.config.get('server_aggregation', [{'name': 'FedAvg'}])[0]['name']
+        #
+        #                 # 调用攻击类中的模型投毒方法，篡改最终要上传的 model_state
+        #                 model_state = attack.apply_model_poisoning(
+        #                     local_model_state=model_state,
+        #                     global_model_state=self.global_model_state,
+        #                     algorithm=agg_algo
+        #                 )
         with torch.no_grad():
             model_cpu = self.model.cpu()
             model_state = model_cpu.state_dict()
@@ -246,6 +265,21 @@ class FLClient:
                 for attack in self.attacks:
                     apply_to_client_ids = attack.config.get('apply_to_client_ids', [])
                     if attack and self.client_id in apply_to_client_ids and attack.should_apply(round_idx):
+
+                        # =======================================================
+                        # 💥 【第二步修改：为 LP 攻击动态挂载 LSA 测试环境】
+                        # =======================================================
+                        if hasattr(attack, 'setup_lsa_environment'):
+                            # 注意：因为上面刚执行了 self.model.cpu()，模型现在在 CPU 上
+                            # 所以我们将推理设备指定为 torch.device('cpu')，
+                            # 测试一两个 Batch 非常快，还能避免显存报错。
+                            attack.setup_lsa_environment(
+                                model=self.model,
+                                dataloader=dataloader,
+                                device=self.device
+                            )
+                        # =======================================================
+
                         # 获取当前的聚合算法名称 (如 FedAvg)
                         agg_algo = self.config.get('server_aggregation', [{'name': 'FedAvg'}])[0]['name']
 

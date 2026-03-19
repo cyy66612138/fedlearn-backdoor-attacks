@@ -89,6 +89,18 @@ class _ResNet(nn.Module):
         out = self.linear(out)
         return out
 
+    def get_feature(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+        out = self.layer4(out)
+        # 经过全局池化和展平
+        out = F.adaptive_avg_pool2d(out, (1, 1))
+        features = out.view(out.size(0), -1)
+        # ⚠️ 注意：这里直接返回 features，不要经过最后那层 self.linear
+        return features
+
 
 @register_model("resnet18")
 def resnet18(num_classes):

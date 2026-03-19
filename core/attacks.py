@@ -719,33 +719,216 @@ class ModelReplacementAttack(BaseAttack):
         return scaled_state
 
 
+# class NeurotoxinAttack(BaseAttack):
+#     """
+#     Neurotoxin Attack
+#
+#     [Neurotoxin: Durable Backdoors in Federated Learning](https://proceedings.mlr.press/v162/zhang22w.html) - ICML '22
+#
+#     Neurotoxin relies on infrequently updated coordinates by benign clients to hide the backdoor.
+#     It uses a gradient mask to project gradients to infrequent coordinates, and applies gradient
+#     norm clipping to prevent excessive updates.
+#
+#     This implementation includes both:
+#     1. Data poisoning: Trigger injection (white square pattern at bottom-right corner)
+#     2. Model poisoning: Gradient masking + norm clipping via apply_model_poisoning() method
+#
+#     The model poisoning logic (adapted from FLPoison):
+#     - Identifies infrequently-updated coordinates (top-k smallest absolute update values)
+#     - Applies a mask to only update those coordinates
+#     - Clips the norm of the update to prevent excessive changes
+#     """
+#
+#     def __init__(self, config: Dict[str, Any]):
+#         super().__init__(config)
+#
+#         # Neurotoxin specific parameters
+#         self.target_class = config.get('target_class', 6)
+#
+#         # Auto-set trigger dimensions based on input size (square triggers, default 5x5)
+#         input_dim = config.get('input_dim', 32)
+#         if input_dim == 28:
+#             default_size = 4
+#         elif input_dim == 32:
+#             default_size = 5
+#         elif input_dim == 64:
+#             default_size = 9
+#         else:
+#             default_size = 5  # Default fallback
+#
+#         # Get trigger dimensions (default to square, 5x5 for 32x32 images)
+#         self.trigger_height = config.get('trigger_height', default_size)
+#         self.trigger_width = config.get('trigger_width', default_size)
+#
+#         # Backward compatibility: if trigger_size is provided, use it for both dimensions
+#         if 'trigger_size' in config:
+#             self.trigger_height = config.get('trigger_size', default_size)
+#             self.trigger_width = config.get('trigger_size', default_size)
+#
+#         # Trigger position (default: bottom-right, same as Model Replacement)
+#         self.trigger_position = config.get('trigger_position', 'bottom-right')
+#
+#         # Model poisoning parameters
+#         self.topk_ratio = config.get('topk_ratio', 0.1)  # Ratio of top-k smallest absolute values (default matches FLPoison)
+#         self.norm_threshold = config.get('norm_threshold', 0.2)  # Norm clipping threshold (default matches FLPoison)
+#
+#     def get_data_type(self) -> str:
+#         return "image"
+#
+#     def _apply_static_trigger(self, poisoned_data: torch.Tensor, poisoned_labels: torch.Tensor,
+#                              poison_indices: torch.Tensor) -> None:
+#         """
+#         Apply Neurotoxin trigger pattern (same as Model Replacement/BadNets).
+#         White square pattern positioned at bottom-right corner by default.
+#         """
+#         _, h, w = poisoned_data.shape[1], poisoned_data.shape[2], poisoned_data.shape[3]
+#
+#         # Apply white trigger pattern (value 1.0) to selected indices
+#         if self.trigger_position == 'bottom-right':
+#             # Bottom-right: from bottom-right corner (default)
+#             row_start = h - self.trigger_height
+#             row_end = h
+#             col_start = w - self.trigger_width
+#             col_end = w
+#         elif self.trigger_position == 'bottom-left':
+#             # Bottom-left: from bottom-left corner (optional alternative)
+#             row_start = h - self.trigger_height
+#             row_end = h
+#             col_start = 0
+#             col_end = self.trigger_width
+#         else:
+#             raise ValueError(f"Unknown trigger_position: {self.trigger_position}. "
+#                            f"Supported: 'bottom-left', 'bottom-right'")
+#
+#         # Apply trigger pattern (white square: value 1.0)
+#         poisoned_data[poison_indices, :, row_start:row_end, col_start:col_end] = 1.0
+#         # Change labels to target class
+#         poisoned_labels[poison_indices] = self.target_class
+#
+#     def _vectorize_state_dict(self, state_dict: Dict[str, torch.Tensor]) -> np.ndarray:
+#         """Vectorize model state dict into a flat numpy array"""
+#         vec_list = []
+#         for key, param in state_dict.items():
+#             # Skip non-parameter tensors (e.g., running_mean, running_var, num_batches_tracked)
+#             if 'num_batches_tracked' in key:
+#                 continue
+#             vec_list.append(param.detach().cpu().numpy().flatten())
+#         return np.concatenate(vec_list) if vec_list else np.array([])
+#
+#     def _unvectorize_to_state_dict(self, vector: np.ndarray,
+#                                    reference_state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+#         """Unvectorize flat numpy array back into model state dict"""
+#         state_dict = {}
+#         offset = 0
+#
+#         for key, param in reference_state.items():
+#             # Skip non-parameter tensors
+#             if 'num_batches_tracked' in key:
+#                 state_dict[key] = param.clone()
+#                 continue
+#
+#             numel = param.numel()
+#             param_vec = vector[offset:offset + numel]
+#             state_dict[key] = torch.from_numpy(param_vec.reshape(param.shape)).to(param.device, dtype=param.dtype)
+#             offset += numel
+#
+#         return state_dict
+#
+#     def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
+#                               global_model_state: Dict[str, torch.Tensor],
+#                               algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
+#         """
+#         Apply Neurotoxin gradient masking and norm clipping to model updates.
+#
+#         This implements the model poisoning component of Neurotoxin Attack.
+#         The method:
+#         1. Identifies infrequently-updated coordinates (top-k smallest absolute update values)
+#         2. Applies a mask to only update those coordinates
+#         3. Clips the norm of the update to prevent excessive changes
+#
+#         Args:
+#             local_model_state: Current local model state dict
+#             global_model_state: Global model state dict
+#             algorithm: FL algorithm type (not used in Neurotoxin, but kept for interface consistency)
+#
+#         Returns:
+#             Masked and norm-clipped model state dict
+#         """
+#         # Compute update: local - global
+#         update_dict = {}
+#         for key in local_model_state.keys():
+#             if 'num_batches_tracked' in key:
+#                 continue
+#             if key in global_model_state:
+#                 update_dict[key] = local_model_state[key] - global_model_state[key]
+#             else:
+#                 update_dict[key] = local_model_state[key].clone()
+#
+#         # Vectorize the update
+#         update_vec = self._vectorize_state_dict(update_dict)
+#
+#         if len(update_vec) == 0:
+#             # If no valid parameters, return local model as-is
+#             return local_model_state
+#
+#         # Step 1: Create gradient mask (top-k smallest absolute values = infrequent coordinates)
+#         k = max(1, int(len(update_vec) * self.topk_ratio))
+#         abs_update_vec = np.abs(update_vec)
+#         # Get indices of top-k smallest absolute values
+#         topk_indices = np.argpartition(abs_update_vec, k)[:k]
+#
+#         # Create mask: 1.0 for infrequent coordinates, 0.0 for others
+#         mask_vec = np.zeros(len(update_vec))
+#         mask_vec[topk_indices] = 1.0
+#
+#         # Step 2: Apply mask to update
+#         masked_update_vec = update_vec * mask_vec
+#
+#         # Step 3: Norm clipping
+#         norm = np.linalg.norm(masked_update_vec)
+#         if norm > self.norm_threshold:
+#             scale = self.norm_threshold / norm
+#             masked_update_vec = masked_update_vec * scale
+#
+#         # Step 4: Unvectorize and add to global state
+#         masked_update_dict = self._unvectorize_to_state_dict(masked_update_vec, local_model_state)
+#
+#         # Final state: global + masked_clipped_update
+#         final_state = {}
+#         with torch.no_grad():
+#             for key in local_model_state.keys():
+#                 if 'num_batches_tracked' in key:
+#                     # Keep tracking parameters from local model
+#                     final_state[key] = local_model_state[key].clone()
+#                     continue
+#
+#                 if key in global_model_state and key in masked_update_dict:
+#                     final_state[key] = global_model_state[key] + masked_update_dict[key]
+#                 elif key in local_model_state:
+#                     # Fallback: use local state if global not available
+#                     final_state[key] = local_model_state[key].clone()
+#
+#         return final_state
 class NeurotoxinAttack(BaseAttack):
     """
-    Neurotoxin Attack
-    
-    [Neurotoxin: Durable Backdoors in Federated Learning](https://proceedings.mlr.press/v162/zhang22w.html) - ICML '22
-    
-    Neurotoxin relies on infrequently updated coordinates by benign clients to hide the backdoor.
-    It uses a gradient mask to project gradients to infrequent coordinates, and applies gradient
-    norm clipping to prevent excessive updates.
-    
-    This implementation includes both:
-    1. Data poisoning: Trigger injection (white square pattern at bottom-right corner)
-    2. Model poisoning: Gradient masking + norm clipping via apply_model_poisoning() method
-    
-    The model poisoning logic (adapted from FLPoison):
-    - Identifies infrequently-updated coordinates (top-k smallest absolute update values)
-    - Applies a mask to only update those coordinates
-    - Clips the norm of the update to prevent excessive changes
+    Neurotoxin Attack (自适应动态裁剪升级版)
+
+    [Neurotoxin: Durable Backdoors in Federated Learning] - ICML '22
+
+    改进说明：
+    废弃了原版代码中死板的 norm_threshold = 0.2 绝对阈值。
+    改为在本地计算每次更新的真实良性范数 (benign_norm) 作为动态安全阈值。
+    在执行掩码后，允许对残余的后门梯度进行适度放大，但最终范数会被严格裁剪至不大于 benign_norm，
+    从而在实现“最高隐蔽性”的同时，尽可能保证后门的致死率。
     """
-    
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        
-        # Neurotoxin specific parameters
+
+        # Neurotoxin 基础参数
         self.target_class = config.get('target_class', 6)
-        
-        # Auto-set trigger dimensions based on input size (square triggers, default 5x5)
+
+        # 触发器尺寸与位置设置 (默认 5x5 右下角)
         input_dim = config.get('input_dim', 32)
         if input_dim == 28:
             default_size = 4
@@ -754,162 +937,213 @@ class NeurotoxinAttack(BaseAttack):
         elif input_dim == 64:
             default_size = 9
         else:
-            default_size = 5  # Default fallback
-        
-        # Get trigger dimensions (default to square, 5x5 for 32x32 images)
+            default_size = 5
+
         self.trigger_height = config.get('trigger_height', default_size)
         self.trigger_width = config.get('trigger_width', default_size)
-        
-        # Backward compatibility: if trigger_size is provided, use it for both dimensions
         if 'trigger_size' in config:
             self.trigger_height = config.get('trigger_size', default_size)
             self.trigger_width = config.get('trigger_size', default_size)
-        
-        # Trigger position (default: bottom-right, same as Model Replacement)
+
         self.trigger_position = config.get('trigger_position', 'bottom-right')
-        
-        # Model poisoning parameters
-        self.topk_ratio = config.get('topk_ratio', 0.1)  # Ratio of top-k smallest absolute values (default matches FLPoison)
-        self.norm_threshold = config.get('norm_threshold', 0.2)  # Norm clipping threshold (default matches FLPoison)
-    
+
+        # 模型投毒参数
+        self.topk_ratio = config.get('topk_ratio', 0.1)  # 休眠参数比例 (寻找绝对值最小的 10%)
+        # 新增：由于掩码会丢失大量能量，允许先放大，再通过自适应裁剪保证安全
+        self.lambda_val = config.get('lambda_val', 5.0)
+
     def get_data_type(self) -> str:
         return "image"
-    
-    def _apply_static_trigger(self, poisoned_data: torch.Tensor, poisoned_labels: torch.Tensor, 
-                             poison_indices: torch.Tensor) -> None:
+
+    def _apply_static_trigger(self, poisoned_data: torch.Tensor, poisoned_labels: torch.Tensor,
+                              poison_indices: torch.Tensor) -> None:
         """
-        Apply Neurotoxin trigger pattern (same as Model Replacement/BadNets).
-        White square pattern positioned at bottom-right corner by default.
+        数据投毒：植入静态触发器
         """
         _, h, w = poisoned_data.shape[1], poisoned_data.shape[2], poisoned_data.shape[3]
-        
-        # Apply white trigger pattern (value 1.0) to selected indices
+
         if self.trigger_position == 'bottom-right':
-            # Bottom-right: from bottom-right corner (default)
-            row_start = h - self.trigger_height
-            row_end = h
-            col_start = w - self.trigger_width
-            col_end = w
+            row_start, row_end = h - self.trigger_height, h
+            col_start, col_end = w - self.trigger_width, w
         elif self.trigger_position == 'bottom-left':
-            # Bottom-left: from bottom-left corner (optional alternative)
-            row_start = h - self.trigger_height
-            row_end = h
-            col_start = 0
-            col_end = self.trigger_width
+            row_start, row_end = h - self.trigger_height, h
+            col_start, col_end = 0, self.trigger_width
         else:
-            raise ValueError(f"Unknown trigger_position: {self.trigger_position}. "
-                           f"Supported: 'bottom-left', 'bottom-right'")
-        
-        # Apply trigger pattern (white square: value 1.0)
+            raise ValueError(f"Unknown trigger_position: {self.trigger_position}")
+
         poisoned_data[poison_indices, :, row_start:row_end, col_start:col_end] = 1.0
-        # Change labels to target class
         poisoned_labels[poison_indices] = self.target_class
-    
+
     def _vectorize_state_dict(self, state_dict: Dict[str, torch.Tensor]) -> np.ndarray:
-        """Vectorize model state dict into a flat numpy array"""
+        """将模型字典展平为一维 Numpy 数组"""
         vec_list = []
         for key, param in state_dict.items():
-            # Skip non-parameter tensors (e.g., running_mean, running_var, num_batches_tracked)
             if 'num_batches_tracked' in key:
                 continue
             vec_list.append(param.detach().cpu().numpy().flatten())
         return np.concatenate(vec_list) if vec_list else np.array([])
-    
-    def _unvectorize_to_state_dict(self, vector: np.ndarray, 
+
+    def _unvectorize_to_state_dict(self, vector: np.ndarray,
                                    reference_state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Unvectorize flat numpy array back into model state dict"""
+        """将一维数组还原回模型字典结构"""
         state_dict = {}
         offset = 0
-        
         for key, param in reference_state.items():
-            # Skip non-parameter tensors
             if 'num_batches_tracked' in key:
                 state_dict[key] = param.clone()
                 continue
-            
             numel = param.numel()
             param_vec = vector[offset:offset + numel]
             state_dict[key] = torch.from_numpy(param_vec.reshape(param.shape)).to(param.device, dtype=param.dtype)
             offset += numel
-        
         return state_dict
-    
-    def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor], 
+
+    # def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
+    #                           global_model_state: Dict[str, torch.Tensor],
+    #                           algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
+    #     """
+    #     模型投毒核心逻辑：动态寻找休眠参数 -> 掩码与放大 -> 自适应范数裁剪
+    #     """
+    #     update_dict = {}
+    #     for key in local_model_state.keys():
+    #         if 'num_batches_tracked' in key:
+    #             continue
+    #         if key in global_model_state:
+    #             update_dict[key] = local_model_state[key] - global_model_state[key]
+    #         else:
+    #             update_dict[key] = local_model_state[key].clone()
+    #
+    #     # 1. 展平本地更新量
+    #     update_vec = self._vectorize_state_dict(update_dict)
+    #     if len(update_vec) == 0:
+    #         return local_model_state
+    #
+    #     # ==========================================
+    #     # 🟢 改进 1：计算当前轮次的“自适应安全阈值”
+    #     # ==========================================
+    #     benign_norm = np.linalg.norm(update_vec)
+    #
+    #     # 2. 寻找最不活跃的休眠坐标 (Top-k smallest absolute values)
+    #     k = max(1, int(len(update_vec) * self.topk_ratio))
+    #     abs_update_vec = np.abs(update_vec)
+    #     topk_indices = np.argpartition(abs_update_vec, k)[:k]
+    #
+    #     # 3. 生成掩码
+    #     mask_vec = np.zeros(len(update_vec))
+    #     mask_vec[topk_indices] = 1.0
+    #
+    #     # ==========================================
+    #     # 🟢 改进 2：掩码后施加能量补偿，并执行自适应裁剪
+    #     # ==========================================
+    #     # 因为清零了 90% 的参数，为了保证后门有效性，先尝试放大 lambda_val 倍
+    #     masked_update_vec = update_vec * mask_vec * self.lambda_val
+    #
+    #     # 计算当前恶意更新的范数
+    #     current_norm = np.linalg.norm(masked_update_vec)
+    #
+    #     # 【核心安全锁】：如果放大后的能量超过了原有的良性范数，强行裁剪回 benign_norm
+    #     # 保证服务器无论设置多么严格的范数异常检测，都绝对抓不住它
+    #     if current_norm > benign_norm and current_norm > 0:
+    #         scale = benign_norm / current_norm
+    #         masked_update_vec = masked_update_vec * scale
+    #
+    #     # 4. 还原结构并伪装成完整模型
+    #     masked_update_dict = self._unvectorize_to_state_dict(masked_update_vec, local_model_state)
+    #
+    #     final_state = {}
+    #     with torch.no_grad():
+    #         for key in local_model_state.keys():
+    #             if 'num_batches_tracked' in key:
+    #                 final_state[key] = local_model_state[key].clone()
+    #                 continue
+    #
+    #             if key in global_model_state and key in masked_update_dict:
+    #                 final_state[key] = global_model_state[key] + masked_update_dict[key]
+    #             elif key in local_model_state:
+    #                 final_state[key] = local_model_state[key].clone()
+    #
+    #     return final_state
+    def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
                               global_model_state: Dict[str, torch.Tensor],
                               algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
         """
-        Apply Neurotoxin gradient masking and norm clipping to model updates.
-        
-        This implements the model poisoning component of Neurotoxin Attack.
-        The method:
-        1. Identifies infrequently-updated coordinates (top-k smallest absolute update values)
-        2. Applies a mask to only update those coordinates
-        3. Clips the norm of the update to prevent excessive changes
-        
-        Args:
-            local_model_state: Current local model state dict
-            global_model_state: Global model state dict
-            algorithm: FL algorithm type (not used in Neurotoxin, but kept for interface consistency)
-        
-        Returns:
-            Masked and norm-clipped model state dict
+        模型投毒核心逻辑：动态寻找休眠参数 -> 掩码与放大 -> 自适应范数裁剪 + 数值安全保障
         """
-        # Compute update: local - global
         update_dict = {}
+
+        # 1. 计算本地更新量 (Delta)
         for key in local_model_state.keys():
             if 'num_batches_tracked' in key:
                 continue
+            # 确保在 CPU 上进行 numpy 转换前的计算，避免显存爆炸
             if key in global_model_state:
-                update_dict[key] = local_model_state[key] - global_model_state[key]
+                update_dict[key] = (local_model_state[key].cpu() - global_model_state[key].cpu()).float()
             else:
-                update_dict[key] = local_model_state[key].clone()
-        
-        # Vectorize the update
+                update_dict[key] = local_model_state[key].cpu().clone().float()
+
+        # 2. 展平本地更新量
         update_vec = self._vectorize_state_dict(update_dict)
-        
         if len(update_vec) == 0:
-            # If no valid parameters, return local model as-is
             return local_model_state
-        
-        # Step 1: Create gradient mask (top-k smallest absolute values = infrequent coordinates)
+
+        # ==========================================
+        # 🟢 改进 1：数值清理 (防止初始更新中就包含 NaN)
+        # ==========================================
+        update_vec = np.nan_to_num(update_vec, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # 计算当前轮次的“自适应安全阈值” (良性范数)
+        benign_norm = np.linalg.norm(update_vec)
+        if benign_norm == 0:
+            return local_model_state
+
+        # 3. 寻找最不活跃的休眠坐标 (Top-k smallest absolute values)
+        # Neurotoxin 核心：寻找那些在正常训练中几乎不更新的参数
         k = max(1, int(len(update_vec) * self.topk_ratio))
         abs_update_vec = np.abs(update_vec)
-        # Get indices of top-k smallest absolute values
+        # 获取绝对值最小的前 k 个索引
         topk_indices = np.argpartition(abs_update_vec, k)[:k]
-        
-        # Create mask: 1.0 for infrequent coordinates, 0.0 for others
-        mask_vec = np.zeros(len(update_vec))
-        mask_vec[topk_indices] = 1.0
-        
-        # Step 2: Apply mask to update
-        masked_update_vec = update_vec * mask_vec
-        
-        # Step 3: Norm clipping
-        norm = np.linalg.norm(masked_update_vec)
-        if norm > self.norm_threshold:
-            scale = self.norm_threshold / norm
+
+        # 4. 生成掩码并执行能量补偿
+        # 仅保留这 10% 的休眠参数，并尝试放大 lambda_val 倍
+        masked_update_vec = np.zeros_like(update_vec)
+        masked_update_vec[topk_indices] = update_vec[topk_indices] * self.lambda_val
+
+        # ==========================================
+        # 🟢 改进 2：自适应范数裁剪 (核心安全锁)
+        # ==========================================
+        current_norm = np.linalg.norm(masked_update_vec)
+
+        # 如果放大后的恶意更新能量超过了原始更新的范数，执行投影裁剪
+        # 这能确保更新量在统计特征上与良性客户端一致，且不会数值爆炸
+        if current_norm > benign_norm and current_norm > 0:
+            scale = benign_norm / current_norm
             masked_update_vec = masked_update_vec * scale
-        
-        # Step 4: Unvectorize and add to global state
+
+        # ==========================================
+        # 🟢 改进 3：二次数值安全检查 (防止产生新的 NaN)
+        # ==========================================
+        masked_update_vec = np.nan_to_num(masked_update_vec, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # 5. 还原结构并伪装成完整模型
         masked_update_dict = self._unvectorize_to_state_dict(masked_update_vec, local_model_state)
-        
-        # Final state: global + masked_clipped_update
+
         final_state = {}
         with torch.no_grad():
             for key in local_model_state.keys():
+                # 保持 BN 层统计信息不变
                 if 'num_batches_tracked' in key:
-                    # Keep tracking parameters from local model
                     final_state[key] = local_model_state[key].clone()
                     continue
-                
-                if key in global_model_state and key in masked_update_dict:
-                    final_state[key] = global_model_state[key] + masked_update_dict[key]
-                elif key in local_model_state:
-                    # Fallback: use local state if global not available
-                    final_state[key] = local_model_state[key].clone()
-        
-        return final_state
 
+                if key in global_model_state and key in masked_update_dict:
+                    # 最终参数 = 全局基座 + 篡改后的休眠层增量
+                    # 确保转回原始数据类型 (如 float16/float32)
+                    final_state[key] = global_model_state[key].cpu() + masked_update_dict[key].to(
+                        global_model_state[key].dtype)
+                elif key in local_model_state:
+                    final_state[key] = local_model_state[key].cpu().clone()
+
+        return final_state
 
 class EdgeCaseBackdoorAttack(BaseAttack):
     """
@@ -1719,97 +1953,286 @@ class FedDAREAttack(BaseAttack):
 #
 #         return poisoned_state
 
+# class LayerwisePoisoningAttack(BadNetsAttack):
+#     """
+#     Implementation of the Layer-wise Poisoning (LP) attack from the paper:
+#     'BACKDOOR FEDERATED LEARNING BY POISONING BACKDOOR-CRITICAL LAYERS'
+#
+#     动态寻找 Backdoor-Critical (BC) 层：
+#     通过评估本地后门训练后各层的更新量范数（Norm），自动挑选更新最剧烈的前 K 层作为 BC 层，
+#     仅对这些层进行放大投毒，其余层返回 0 更新以维持隐蔽性。
+#     """
+#
+#     def __init__(self, config: Dict[str, Any]):
+#         super().__init__(config)
+#         # 废弃固定的 bc_layers，改为按比例或指定数量动态选取
+#         # 默认选取更新范数最大的前 10% 的参数矩阵作为 BC 层
+#         self.bc_layer_ratio = config.get('bc_layer_ratio', 0.1)
+#         self.num_bc_layers = config.get('num_bc_layers', None)  # 也可以在 YAML 中直接指定具体层数 (例如 6)
+#         self.lambda_val = config.get('lambda_val', 2.0)
+#
+#     def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
+#                               global_model_state: Dict[str, torch.Tensor],
+#                               algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
+#
+#         poisoned_state = {}
+#         layer_updates = {}
+#         layer_norms = {}
+#         raw_squared_sum = 0.0
+#
+#         # 1. 计算所有层的本地更新量 (Delta W) 及其 L2 范数
+#         for key in local_model_state.keys():
+#             # 跳过 BN 层的统计特征
+#             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
+#                 continue
+#
+#             delta = local_model_state[key].float() - global_model_state[key].float()
+#             layer_updates[key] = delta
+#
+#             # 使用范数来衡量该层对后门任务的“敏感度/关键度”
+#             norm = torch.norm(delta, p=2).item()
+#             layer_norms[key] = norm
+#             raw_squared_sum += norm ** 2
+#
+#         estimated_benign_norm = (raw_squared_sum ** 0.5)
+#         max_allowed_norm = estimated_benign_norm * 1.5
+#
+#         # 2. 动态定位 Backdoor-Critical (BC) 层
+#         # 按照各层更新量的大小进行降序排序
+#         sorted_layers = sorted(layer_norms.items(), key=lambda x: x[1], reverse=True)
+#
+#         # 决定要选择的 BC 层数量 (K)
+#         if self.num_bc_layers is not None:
+#             k = self.num_bc_layers
+#         else:
+#             k = max(1, int(len(layer_norms) * self.bc_layer_ratio))
+#
+#         # 提取 Top-K 最敏感的层名作为 BC 层
+#         bc_layers_keys = set([layer[0] for layer in sorted_layers[:k]])
+#
+#         # 3. 针对性执行层级投毒 (Layer-wise Poisoning)
+#         poisoned_deltas = {}
+#         poisoned_squared_sum = 0.0
+#
+#         for key in local_model_state.keys():
+#             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
+#                 continue
+#
+#             delta = layer_updates[key]
+#
+#             if key in bc_layers_keys:
+#                 # [核心逻辑]: 关键层 -> 放大后门更新，植入恶意特征
+#                 p_delta = delta * self.lambda_val
+#             else:
+#                 # [核心逻辑]: 非关键层 -> 强行掩码清零，骗过相似度检测 (如 FoolsGold)
+#                 p_delta = torch.zeros_like(delta)
+#
+#             poisoned_deltas[key] = p_delta
+#             poisoned_squared_sum += torch.sum(p_delta ** 2).item()
+#
+#         poisoned_norm = (poisoned_squared_sum ** 0.5)
+#
+#         # 4. 自适应裁剪 (防止范数超标被服务器截断)
+#         clip_rate = 1.0
+#         if poisoned_norm > max_allowed_norm and poisoned_norm > 0:
+#             clip_rate = max_allowed_norm / poisoned_norm
+#
+#         # 5. 重构并封装最终要上传的欺骗性模型参数
+#         for key in local_model_state.keys():
+#             if key not in poisoned_deltas:
+#                 poisoned_state[key] = local_model_state[key]
+#             else:
+#                 final_delta = poisoned_deltas[key] * clip_rate
+#                 poisoned_state[key] = (global_model_state[key].float() + final_delta).to(local_model_state[key].dtype)
+#
+#         return poisoned_state
+
+import torch
+from typing import Dict, Any, List
+
+
 class LayerwisePoisoningAttack(BadNetsAttack):
     """
-    Implementation of the Layer-wise Poisoning (LP) attack from the paper:
-    'BACKDOOR FEDERATED LEARNING BY POISONING BACKDOOR-CRITICAL LAYERS'
-
-    动态寻找 Backdoor-Critical (BC) 层：
-    通过评估本地后门训练后各层的更新量范数（Norm），自动挑选更新最剧烈的前 K 层作为 BC 层，
-    仅对这些层进行放大投毒，其余层返回 0 更新以维持隐蔽性。
+    Layer-wise Poisoning (LP) Attack - [严格动态每轮 LSA 搜索版]
+    论文: BACKDOOR FEDERATED LEARNING BY POISONING BACKDOOR-CRITICAL LAYERS (ICLR 2024)
     """
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        # 废弃固定的 bc_layers，改为按比例或指定数量动态选取
-        # 默认选取更新范数最大的前 10% 的参数矩阵作为 BC 层
-        self.bc_layer_ratio = config.get('bc_layer_ratio', 0.1)
-        self.num_bc_layers = config.get('num_bc_layers', None)  # 也可以在 YAML 中直接指定具体层数 (例如 6)
-        self.lambda_val = config.get('lambda_val', 2.0)
 
-    def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
+        self.lambda_val = config.get('lambda_val', 2.0)
+        self.lsa_bsr_threshold = config.get('lsa_bsr_threshold', 0.5)
+
+        # 用于接收 Client 临时注入的环境变量
+        self.lsa_model = None
+        self.lsa_dataloader = None
+        self.lsa_device = None
+
+    def setup_lsa_environment(self, model: torch.nn.Module, dataloader: Any, device: torch.device):
+        """
+        供 Client 在外部调用的依赖注入接口。
+        把模型实例、本地数据集和设备传进来，供 LSA 做物理前向传播测试使用。
+        """
+        self.lsa_model = model
+        self.lsa_dataloader = dataloader
+        self.lsa_device = device
+
+    # def _run_dynamic_lsa(self, benign_state: Dict[str, torch.Tensor],
+    #                      malicious_state: Dict[str, torch.Tensor]) -> List[str]:
+    #     """
+    #     核心 LSA 算法：每一轮动态执行，真实测试 BSR
+    #     """
+    #     if self.lsa_model is None or self.lsa_dataloader is None:
+    #         raise ValueError(
+    #             "LSA Environment not setup! Please call setup_lsa_environment() in client.py before applying model poisoning.")
+    #
+    #     bc_layers_found = []
+    #     self.lsa_model.eval()
+    #
+    #     # 内部评估函数：在干净 batch 上动态投毒并测试 BSR
+    #     def evaluate_bsr(eval_model):
+    #         correct, total = 0, 0
+    #         with torch.no_grad():
+    #             # 为了节省每轮巨大的计算开销，LSA 通常只取 1-2 个 Batch 进行快速嗅探
+    #             for batch_idx, (data, target) in enumerate(self.lsa_dataloader):
+    #                 if batch_idx > 1: break  # 取前 2 个 Batch 足矣
+    #
+    #                 data, target = data.to(self.lsa_device), target.to(self.lsa_device)
+    #                 # 动态生成后门数据 (复用 BadNets 的画白块逻辑)
+    #                 atk_data, atk_label = self.poison_data(data, target)
+    #
+    #                 outputs = eval_model(atk_data)
+    #                 _, predicted = torch.max(outputs.data, 1)
+    #                 total += atk_label.size(0)
+    #                 correct += (predicted == atk_label).sum().item()
+    #         return correct / total if total > 0 else 0.0
+    #
+    #     print(f"[{self.name}] Running In-situ LSA for dynamic BC layers discovery...")
+    #
+    #     for layer_name in benign_state.keys():
+    #         if 'num_batches_tracked' in layer_name or 'running_mean' in layer_name or 'running_var' in layer_name:
+    #             continue
+    #
+    #         # 1. 构造 Hybrid 模型 (全局干净底座 + 单层恶意参数)
+    #         hybrid_state = {k: v.clone() for k, v in benign_state.items()}
+    #         hybrid_state[layer_name] = malicious_state[layer_name].clone()
+    #
+    #         # 2. 物理测试 BSR
+    #         self.lsa_model.load_state_dict(hybrid_state)
+    #         bsr = evaluate_bsr(self.lsa_model)
+    #
+    #         # 3. 筛选 BC 层
+    #         if bsr > self.lsa_bsr_threshold:
+    #             bc_layers_found.append(layer_name)
+    #
+    #     # 恢复模型原本的权重，防止弄脏内存
+    #     self.lsa_model.load_state_dict(malicious_state)
+    #     print(f"[{self.name}] LSA completed. Found {len(bc_layers_found)} BC layers this round: {bc_layers_found}")
+    #
+    #     # 防御性编程：如果这轮没找到任何 BC 层，默认兜底使用最深的全连接层
+    #     if not bc_layers_found:
+    #         fallback = [k for k in benign_state.keys() if 'fc' in k or 'linear' in k or 'classifier' in k]
+    #         return fallback
+    #
+    #     return bc_layers_found
+
+    def _run_dynamic_lsa(self, benign_state: Dict[str, torch.Tensor],
+                         malicious_state: Dict[str, torch.Tensor]) -> List[str]:
+        """
+        核心 LSA 算法：在 GPU 上极速动态执行，真实测试纯粹的 BSR
+        """
+        if self.lsa_model is None or self.lsa_dataloader is None:
+            raise ValueError("LSA Environment not setup!")
+
+        # 🚀 加速关键 1：把模型强制搬回 GPU
+        self.lsa_model = self.lsa_model.to(self.lsa_device)
+        self.lsa_model.eval()
+
+        def evaluate_pure_bsr(eval_model):
+            correct, total = 0, 0
+            with torch.no_grad():
+                for batch_idx, (data, _) in enumerate(self.lsa_dataloader):
+                    # 🚀 加速关键 2：只测 1 个 Batch (约128张图) 就绝对足够暴露后门了
+                    if batch_idx > 0: break
+
+                    data = data.to(self.lsa_device)
+
+                    # 强制 100% 贴图
+                    poisoned_data = data.clone()
+                    poison_indices = torch.arange(data.shape[0])
+
+                    poisoned_data = self._denormalize(poisoned_data)
+                    dummy_labels = torch.zeros(data.shape[0], dtype=torch.long)
+                    self._apply_static_trigger(poisoned_data, dummy_labels, poison_indices)
+                    poisoned_data = self._normalize(poisoned_data)
+
+                    # GPU 极速预测
+                    outputs = eval_model(poisoned_data)
+                    _, predicted = torch.max(outputs.data, 1)
+
+                    total += data.size(0)
+                    correct += (predicted == self.target_class).sum().item()
+
+            return correct / total if total > 0 else 0.0
+
+        print(f"[{self.name}] Running In-situ LSA on GPU for dynamic BC layers discovery...")
+
+        layer_bsr_scores = {}
+
+        for layer_name in benign_state.keys():
+            if 'num_batches_tracked' in layer_name or 'running_mean' in layer_name or 'running_var' in layer_name:
+                continue
+
+            # 构造 Hybrid 模型并加载 (PyTorch 会自动把 CPU dict 传到 GPU 模型里)
+            hybrid_state = {k: v.clone() for k, v in benign_state.items()}
+            hybrid_state[layer_name] = malicious_state[layer_name].clone()
+
+            self.lsa_model.load_state_dict(hybrid_state)
+            layer_bsr_scores[layer_name] = evaluate_pure_bsr(self.lsa_model)
+
+        # 🚀 内存安全：测完之后把模型物归原主，并放回 CPU，防止主进程显存爆炸
+        self.lsa_model.load_state_dict(malicious_state)
+        self.lsa_model = self.lsa_model.cpu()
+
+        # 降序排列，取 Top-K 最致命的层
+        sorted_layers = sorted(layer_bsr_scores.items(), key=lambda x: x[1], reverse=True)
+
+        bc_ratio = self.config.get('bc_layer_ratio', 0.05)
+        k = max(2, int(len(sorted_layers) * bc_ratio))
+
+        bc_layers_found = [layer_name for layer_name, score in sorted_layers[:k]]
+
+        print(f"[{self.name}] LSA completed in < 1s. Top {k} BC layers this round: {bc_layers_found}")
+
+        return bc_layers_found
+    def apply_model_poisoning(self,
+                              local_model_state: Dict[str, torch.Tensor],
                               global_model_state: Dict[str, torch.Tensor],
                               algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
 
+        # ==========================================
+        # 💥 杀招 0：在篡改前，当场执行 LSA 算出本轮名单
+        # ==========================================
+        dynamic_bc_layers = self._run_dynamic_lsa(global_model_state, local_model_state)
+
         poisoned_state = {}
-        layer_updates = {}
-        layer_norms = {}
-        raw_squared_sum = 0.0
-
-        # 1. 计算所有层的本地更新量 (Delta W) 及其 L2 范数
-        for key in local_model_state.keys():
-            # 跳过 BN 层的统计特征
-            if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
-                continue
-
-            delta = local_model_state[key].float() - global_model_state[key].float()
-            layer_updates[key] = delta
-
-            # 使用范数来衡量该层对后门任务的“敏感度/关键度”
-            norm = torch.norm(delta, p=2).item()
-            layer_norms[key] = norm
-            raw_squared_sum += norm ** 2
-
-        estimated_benign_norm = (raw_squared_sum ** 0.5)
-        max_allowed_norm = estimated_benign_norm * 1.5
-
-        # 2. 动态定位 Backdoor-Critical (BC) 层
-        # 按照各层更新量的大小进行降序排序
-        sorted_layers = sorted(layer_norms.items(), key=lambda x: x[1], reverse=True)
-
-        # 决定要选择的 BC 层数量 (K)
-        if self.num_bc_layers is not None:
-            k = self.num_bc_layers
-        else:
-            k = max(1, int(len(layer_norms) * self.bc_layer_ratio))
-
-        # 提取 Top-K 最敏感的层名作为 BC 层
-        bc_layers_keys = set([layer[0] for layer in sorted_layers[:k]])
-
-        # 3. 针对性执行层级投毒 (Layer-wise Poisoning)
-        poisoned_deltas = {}
-        poisoned_squared_sum = 0.0
-
         for key in local_model_state.keys():
             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
+                poisoned_state[key] = local_model_state[key].clone()
                 continue
 
-            delta = layer_updates[key]
+            # 使用刚才实时算出来的 dynamic_bc_layers 进行判断
+            is_bc_layer = key in dynamic_bc_layers
 
-            if key in bc_layers_keys:
-                # [核心逻辑]: 关键层 -> 放大后门更新，植入恶意特征
-                p_delta = delta * self.lambda_val
+            if is_bc_layer:
+                # 💥 杀招 1：关键层放大
+                delta = local_model_state[key].float() - global_model_state[key].float()
+                poisoned_delta = delta * self.lambda_val
+                poisoned_state[key] = (global_model_state[key].float() + poisoned_delta).to(
+                    local_model_state[key].dtype)
             else:
-                # [核心逻辑]: 非关键层 -> 强行掩码清零，骗过相似度检测 (如 FoolsGold)
-                p_delta = torch.zeros_like(delta)
-
-            poisoned_deltas[key] = p_delta
-            poisoned_squared_sum += torch.sum(p_delta ** 2).item()
-
-        poisoned_norm = (poisoned_squared_sum ** 0.5)
-
-        # 4. 自适应裁剪 (防止范数超标被服务器截断)
-        clip_rate = 1.0
-        if poisoned_norm > max_allowed_norm and poisoned_norm > 0:
-            clip_rate = max_allowed_norm / poisoned_norm
-
-        # 5. 重构并封装最终要上传的欺骗性模型参数
-        for key in local_model_state.keys():
-            if key not in poisoned_deltas:
-                poisoned_state[key] = local_model_state[key]
-            else:
-                final_delta = poisoned_deltas[key] * clip_rate
-                poisoned_state[key] = (global_model_state[key].float() + final_delta).to(local_model_state[key].dtype)
+                # 💥 杀招 2：非关键层隐蔽 (Delta=0)
+                poisoned_state[key] = global_model_state[key].clone()
 
         return poisoned_state
 
