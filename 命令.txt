@@ -8,11 +8,14 @@ nvidia-smi
 
 tmux kill-session -t attack_exps
 
-ps -u chenyang -f | grep python
+ps -u root -f | grep python
 
-python gen_exps_config.py --attack   blended --output configs/exp1 --dataset cifar10 --aggregation FedAvg MultiKrum FLTrust Flame MultiMetric DnC RLR FLARE  --base configs/base.yaml
+python gen_exps_config.py --attack   edgecase --output configs/exp1 --dataset cifar10 --aggregation FedAvg MultiKrum FLTrust Flame MultiMetric DnC RLR FLARE  --base configs/base.yaml
 
-dba blended sinusoidal labelflipping edgecase threedfed modelreplacement neurotoxin badnets feddare layerwisepoisoning
+dba blended sinusoidal labelflipping edgecase threedfed modelreplacement neurotoxin badnets feddare layerwisepoisoning minmax trim krum cerp a3fl fcba iba
+
+blended labelflipping sinusoidal      RLR
+modelreplacement
 
 
 FedAvg FedSGD FedProx SCAFFOLD FedOpt Krum MultiKrum NormClipping WeakDP CRFL Bulyan CoordinateWiseMedian TrimmedMean FLTrust FLDetector Flame DeepSight

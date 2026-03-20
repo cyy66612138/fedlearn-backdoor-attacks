@@ -2300,35 +2300,188 @@ class FoolsGoldAggregation(BaseAggregation):
         mask = torch.cat([torch.zeros(pad_len, dtype=torch.bool), flat], dim=0)
         return mask
 
+# class RLRAggregation(BaseAggregation):
+#     """RLR (Robust Learning Rate): Sign-based aggregation with adaptive learning rates.
+#
+#     RLR computes the sign of each client's update and uses the agreement of signs
+#     to determine a robust learning rate per parameter. If the majority of clients
+#     agree on the sign of an update direction, a positive learning rate is applied;
+#     otherwise, a negative learning rate is used to counteract potential attacks.
+#
+#     Steps per round:
+#       1) Compute each client's update (delta = local - global).
+#       2) Compute the sign of each update.
+#       3) Sum signs to get agreement score per parameter.
+#       4) If agreement >= threshold: use positive server_lr, else negative server_lr.
+#       5) Aggregate updates using simple average (equal weights).
+#       6) Apply aggregated update * robust_lr_vector to global model.
+#
+#     Config keys (under params):
+#       - server_lr: float (default 1.0) - base learning rate
+#       - robustLR_threshold: float (default: number of clients / 2) - minimum agreement threshold
+#     """
+#
+#     def __init__(self, config: Dict[str, Any]):
+#         super().__init__(config)
+#         self.params = config.get('params', {})
+#         self.server_lr = float(self.params.get('server_lr', 1.0))
+#         self.robustLR_threshold = self.params.get('robustLR_threshold', None)  # Will be set in aggregate if None
+#         print(f"🔍 RLRAggregation: server_lr: {self.server_lr}, robustLR_threshold: {self.robustLR_threshold}")
+#
+#     def _stack_client_updates(self, model_keys: List[str], global_snapshot: Dict[str, torch.Tensor],
+#                               client_state: Dict[str, torch.Tensor]) -> torch.Tensor:
+#         """Stack client updates into a flat tensor."""
+#         flat_list = []
+#         for key in model_keys:
+#             # Skip batch norm tracking parameters
+#             if key.split('.')[-1] == 'num_batches_tracked':
+#                 continue
+#             delta = client_state[key].detach().float() - global_snapshot[key]
+#             flat_list.append(delta.view(-1))
+#         return torch.cat(flat_list) if flat_list else torch.tensor([])
+#
+#     def _unstack_update(self, flat_update: torch.Tensor, model_keys: List[str],
+#                        global_snapshot: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+#         """Unstack flat tensor back into model update dictionary."""
+#         update_dict = {}
+#         offset = 0
+#         for key in model_keys:
+#             if key.split('.')[-1] == 'num_batches_tracked':
+#                 # Skip batch norm tracking parameters, keep original value
+#                 continue
+#             numel = global_snapshot[key].numel()
+#             update_dict[key] = flat_update[offset:offset + numel].view_as(global_snapshot[key])
+#             offset += numel
+#         return update_dict
+#
+#     def _compute_robust_lr(self, agent_updates_dict: Dict[int, torch.Tensor],
+#                           threshold: float, device: torch.device) -> torch.Tensor:
+#         """Compute robust learning rate vector based on sign agreement.
+#
+#         This follows the exact logic from RLRorigin.py:
+#         1. Compute sign of each update
+#         2. Sum signs and take absolute value to get agreement score
+#         3. If agreement >= threshold: use positive server_lr, else negative server_lr
+#
+#         Args:
+#             agent_updates_dict: Dictionary mapping client index to flat update tensor
+#             threshold: Agreement threshold (minimum number of agreeing signs)
+#             device: Device to place the result tensor
+#
+#         Returns:
+#             Learning rate vector of shape [num_params] with values in {server_lr, -server_lr}
+#         """
+#         if not agent_updates_dict:
+#             return torch.tensor([self.server_lr], device=device)
+#
+#         # Get sign of each update (exactly as in original RLR)
+#         agent_updates_sign = [torch.sign(update) for update in agent_updates_dict.values()]
+#
+#         # Sum of signs gives agreement score (absolute value)
+#         sm_of_signs = torch.abs(sum(agent_updates_sign))
+#
+#         # Apply threshold exactly as in original: modify in place
+#         # If agreement < threshold: use negative LR, else use positive LR
+#         lr_vector = sm_of_signs.clone()
+#         lr_vector[sm_of_signs < threshold] = -self.server_lr
+#         lr_vector[sm_of_signs >= threshold] = self.server_lr
+#
+#         return lr_vector.to(device)
+#
+#     def _agg_avg(self, agent_updates_dict: Dict[int, torch.Tensor]) -> torch.Tensor:
+#         """Simple average aggregation of client updates (equal weights)."""
+#         if not agent_updates_dict:
+#             raise ValueError("agent_updates_dict is empty")
+#
+#         sm_updates = sum(agent_updates_dict.values())
+#         total_data = len(agent_updates_dict)
+#         return sm_updates / total_data
+#
+#     def aggregate(self, global_model: nn.Module, client_results: List[Dict],
+#                   round_num: int) -> nn.Module:
+#         """Aggregate client updates using Robust Learning Rate method."""
+#         if not client_results:
+#             return global_model
+#
+#         model_keys = list(client_results[0]['model_state'].keys())
+#         global_state = global_model.state_dict()
+#         snapshot = {k: v.clone().detach().float() for k, v in global_state.items()}
+#
+#         # Filter out batch norm tracking parameters from model_keys for update computation
+#         update_keys = [k for k in model_keys if k.split('.')[-1] != 'num_batches_tracked']
+#
+#         # Build agent updates dictionary: client_idx -> flat update tensor
+#         agent_updates_dict: Dict[int, torch.Tensor] = {}
+#         for idx, result in enumerate(client_results):
+#             client_update = self._stack_client_updates(update_keys, snapshot, result['model_state'])
+#             if client_update.numel() > 0:
+#                 agent_updates_dict[idx] = client_update
+#
+#         if not agent_updates_dict:
+#             return global_model
+#
+#         # Determine threshold: default to half the number of clients
+#         num_clients = len(agent_updates_dict)
+#         threshold = self.robustLR_threshold
+#         if threshold is None:
+#             threshold = float(num_clients / 2)
+#         threshold = float(threshold)
+#
+#         print(f"🔍 RLRAggregation: num_clients: {num_clients}, threshold: {threshold}")
+#
+#         # Get device from first update
+#         device = list(agent_updates_dict.values())[0].device
+#
+#         # Compute robust learning rate vector
+#         lr_vector = self._compute_robust_lr(agent_updates_dict, threshold, device)
+#
+#         # Aggregate updates using simple average
+#         aggregated_updates = self._agg_avg(agent_updates_dict)
+#
+#         # Apply robust LR to aggregated updates
+#         robust_updates = lr_vector * aggregated_updates
+#
+#         # Unstack and apply to global model
+#         with torch.no_grad():
+#             robust_updates_dict = self._unstack_update(robust_updates, update_keys, snapshot)
+#
+#             for key in update_keys:
+#                 if key in robust_updates_dict:
+#                     # Ensure dtype compatibility
+#                     update = robust_updates_dict[key].to(global_state[key].dtype)
+#                     global_state[key].add_(update)
+#
+#             # Keep batch norm tracking parameters from first client (standard practice)
+#             for key in model_keys:
+#                 if key.split('.')[-1] == 'num_batches_tracked':
+#                     if key in client_results[0]['model_state']:
+#                         global_state[key] = client_results[0]['model_state'][key]
+#
+#         global_model.load_state_dict(global_state)
+#         return global_model
+import torch
+import torch.nn as nn
+from typing import Dict, List, Any
+
+
+# 请确保文件顶部保留了原有的 BaseAggregation 导入，例如: from .base import BaseAggregation
+
 class RLRAggregation(BaseAggregation):
     """RLR (Robust Learning Rate): Sign-based aggregation with adaptive learning rates.
-    
-    RLR computes the sign of each client's update and uses the agreement of signs
-    to determine a robust learning rate per parameter. If the majority of clients
-    agree on the sign of an update direction, a positive learning rate is applied;
-    otherwise, a negative learning rate is used to counteract potential attacks.
-    
-    Steps per round:
-      1) Compute each client's update (delta = local - global).
-      2) Compute the sign of each update.
-      3) Sum signs to get agreement score per parameter.
-      4) If agreement >= threshold: use positive server_lr, else negative server_lr.
-      5) Aggregate updates using simple average (equal weights).
-      6) Apply aggregated update * robust_lr_vector to global model.
-    
-    Config keys (under params):
-      - server_lr: float (default 1.0) - base learning rate
-      - robustLR_threshold: float (default: number of clients / 2) - minimum agreement threshold
+
+    [已修复版]
+    修复了原版在 Non-IID 和强力投毒下由于分配负数学习率导致 Loss 变为 NaN (梯度爆炸) 的严重缺陷。
+    引入了特征冻结 (Feature Freezing)、NaN 清洗 (NaN Sanitizer) 和梯度裁剪 (Gradient Clipping)。
     """
-    
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.params = config.get('params', {})
         self.server_lr = float(self.params.get('server_lr', 1.0))
-        self.robustLR_threshold = self.params.get('robustLR_threshold', None)  # Will be set in aggregate if None
-        print(f"🔍 RLRAggregation: server_lr: {self.server_lr}, robustLR_threshold: {self.robustLR_threshold}")
-    
-    def _stack_client_updates(self, model_keys: List[str], global_snapshot: Dict[str, torch.Tensor], 
+        self.robustLR_threshold = self.params.get('robustLR_threshold', None)
+        print(f"🔍 RLRAggregation [Fixed]: server_lr: {self.server_lr}, robustLR_threshold: {self.robustLR_threshold}")
+
+    def _stack_client_updates(self, model_keys: List[str], global_snapshot: Dict[str, torch.Tensor],
                               client_state: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Stack client updates into a flat tensor."""
         flat_list = []
@@ -2339,9 +2492,9 @@ class RLRAggregation(BaseAggregation):
             delta = client_state[key].detach().float() - global_snapshot[key]
             flat_list.append(delta.view(-1))
         return torch.cat(flat_list) if flat_list else torch.tensor([])
-    
-    def _unstack_update(self, flat_update: torch.Tensor, model_keys: List[str], 
-                       global_snapshot: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+
+    def _unstack_update(self, flat_update: torch.Tensor, model_keys: List[str],
+                        global_snapshot: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Unstack flat tensor back into model update dictionary."""
         update_dict = {}
         offset = 0
@@ -2353,110 +2506,109 @@ class RLRAggregation(BaseAggregation):
             update_dict[key] = flat_update[offset:offset + numel].view_as(global_snapshot[key])
             offset += numel
         return update_dict
-    
-    def _compute_robust_lr(self, agent_updates_dict: Dict[int, torch.Tensor], 
-                          threshold: float, device: torch.device) -> torch.Tensor:
-        """Compute robust learning rate vector based on sign agreement.
-        
-        This follows the exact logic from RLRorigin.py:
-        1. Compute sign of each update
-        2. Sum signs and take absolute value to get agreement score
-        3. If agreement >= threshold: use positive server_lr, else negative server_lr
-        
-        Args:
-            agent_updates_dict: Dictionary mapping client index to flat update tensor
-            threshold: Agreement threshold (minimum number of agreeing signs)
-            device: Device to place the result tensor
-            
-        Returns:
-            Learning rate vector of shape [num_params] with values in {server_lr, -server_lr}
-        """
+
+    def _compute_robust_lr(self, agent_updates_dict: Dict[int, torch.Tensor],
+                           threshold: float, device: torch.device) -> torch.Tensor:
+        """Compute robust learning rate vector based on sign agreement."""
         if not agent_updates_dict:
             return torch.tensor([self.server_lr], device=device)
-        
+
         # Get sign of each update (exactly as in original RLR)
         agent_updates_sign = [torch.sign(update) for update in agent_updates_dict.values()]
-        
+
         # Sum of signs gives agreement score (absolute value)
         sm_of_signs = torch.abs(sum(agent_updates_sign))
-        
-        # Apply threshold exactly as in original: modify in place
-        # If agreement < threshold: use negative LR, else use positive LR
+
         lr_vector = sm_of_signs.clone()
-        lr_vector[sm_of_signs < threshold] = -self.server_lr
+
+        # ==========================================================
+        # 🛠️ 核心修复 1：将反向惩罚（-self.server_lr）改为静默冻结（0.0）
+        # 遇到严重分歧的特征维度，不反向更新，而是直接冻结，防止死亡螺旋
+        # ==========================================================
+        lr_vector[sm_of_signs < threshold] = 0.0
+
         lr_vector[sm_of_signs >= threshold] = self.server_lr
-        
+
         return lr_vector.to(device)
-    
+
     def _agg_avg(self, agent_updates_dict: Dict[int, torch.Tensor]) -> torch.Tensor:
         """Simple average aggregation of client updates (equal weights)."""
         if not agent_updates_dict:
             raise ValueError("agent_updates_dict is empty")
-        
+
         sm_updates = sum(agent_updates_dict.values())
         total_data = len(agent_updates_dict)
         return sm_updates / total_data
-    
-    def aggregate(self, global_model: nn.Module, client_results: List[Dict], 
+
+    def aggregate(self, global_model: nn.Module, client_results: List[Dict],
                   round_num: int) -> nn.Module:
         """Aggregate client updates using Robust Learning Rate method."""
         if not client_results:
             return global_model
-        
+
         model_keys = list(client_results[0]['model_state'].keys())
         global_state = global_model.state_dict()
         snapshot = {k: v.clone().detach().float() for k, v in global_state.items()}
-        
+
         # Filter out batch norm tracking parameters from model_keys for update computation
         update_keys = [k for k in model_keys if k.split('.')[-1] != 'num_batches_tracked']
-        
+
         # Build agent updates dictionary: client_idx -> flat update tensor
         agent_updates_dict: Dict[int, torch.Tensor] = {}
         for idx, result in enumerate(client_results):
             client_update = self._stack_client_updates(update_keys, snapshot, result['model_state'])
             if client_update.numel() > 0:
                 agent_updates_dict[idx] = client_update
-        
+
         if not agent_updates_dict:
             return global_model
-        
+
         # Determine threshold: default to half the number of clients
         num_clients = len(agent_updates_dict)
         threshold = self.robustLR_threshold
         if threshold is None:
             threshold = float(num_clients / 2)
         threshold = float(threshold)
-        
-        print(f"🔍 RLRAggregation: num_clients: {num_clients}, threshold: {threshold}")
-        
+
         # Get device from first update
         device = list(agent_updates_dict.values())[0].device
-        
+
         # Compute robust learning rate vector
         lr_vector = self._compute_robust_lr(agent_updates_dict, threshold, device)
-        
+
         # Aggregate updates using simple average
         aggregated_updates = self._agg_avg(agent_updates_dict)
-        
+
         # Apply robust LR to aggregated updates
         robust_updates = lr_vector * aggregated_updates
-        
+
+        # ==========================================================
+        # 🛠️ 核心修复 2 & 3：数值安全锁 (NaN Sanitizer & Gradient Clipping)
+        # ==========================================================
+        # 1. NaN 清洗器：防止任何极端的除零或溢出污染整个 tensor
+        robust_updates = torch.nan_to_num(robust_updates, nan=0.0, posinf=0.0, neginf=0.0)
+
+        # 2. 全局梯度裁剪：限制单轮更新的最大绝对值幅度，彻底杜绝爆炸
+        # 如果发现正常收敛速度变慢，可以将 0.1 调大到 0.5 或 1.0
+        robust_updates = torch.clamp(robust_updates, min=-0.1, max=0.1)
+        # ==========================================================
+
         # Unstack and apply to global model
         with torch.no_grad():
             robust_updates_dict = self._unstack_update(robust_updates, update_keys, snapshot)
-            
+
             for key in update_keys:
                 if key in robust_updates_dict:
                     # Ensure dtype compatibility
                     update = robust_updates_dict[key].to(global_state[key].dtype)
                     global_state[key].add_(update)
-            
+
             # Keep batch norm tracking parameters from first client (standard practice)
             for key in model_keys:
                 if key.split('.')[-1] == 'num_batches_tracked':
                     if key in client_results[0]['model_state']:
                         global_state[key] = client_results[0]['model_state'][key]
-        
+
         global_model.load_state_dict(global_state)
         return global_model
 

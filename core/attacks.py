@@ -676,48 +676,87 @@ class ModelReplacementAttack(BaseAttack):
         # Change labels to target class
         poisoned_labels[poison_indices] = self.target_class
     
-    def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor], 
+    # def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
+    #                           global_model_state: Dict[str, torch.Tensor],
+    #                           algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
+    #     """
+    #     Apply Model Replacement scaling to model updates.
+    #
+    #     This implements the model poisoning component of Model Replacement Attack.
+    #     Scales the model update by scaling_factor to replace the global model.
+    #
+    #     Formula:
+    #     - For FedAvg: scaled_state = global_state + scaling_factor * (local_state - global_state)
+    #     - For other algorithms: scaled_state = scaling_factor * local_state
+    #
+    #     Args:
+    #         local_model_state: Current local model state dict
+    #         global_model_state: Global model state dict (for FedAvg scaling)
+    #         algorithm: FL algorithm type ('FedAvg', 'FedSGD', 'FedOpt', etc.)
+    #
+    #     Returns:
+    #         Scaled model state dict
+    #     """
+    #     scaled_state = {}
+    #
+    #     with torch.no_grad():
+    #         for key in local_model_state.keys():
+    #             local_param = local_model_state[key]
+    #             global_param = global_model_state.get(key, local_param.clone())
+    #
+    #             if algorithm == 'FedAvg':
+    #                 # For FedAvg: scaled_update = global + scaling_factor * (local - global)
+    #                 # This makes the update replace the global model more effectively
+    #                 update = local_param - global_param
+    #                 scaled_param = global_param + self.scaling_factor * update
+    #             else:
+    #                 # For other algorithms: scaled_update = scaling_factor * local
+    #                 # This scales the entire local model
+    #                 scaled_param = self.scaling_factor * local_param
+    #
+    #             scaled_state[key] = scaled_param
+    #
+    #     return scaled_state
+    def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
                               global_model_state: Dict[str, torch.Tensor],
                               algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
         """
-        Apply Model Replacement scaling to model updates.
-        
-        This implements the model poisoning component of Model Replacement Attack.
-        Scales the model update by scaling_factor to replace the global model.
-        
-        Formula:
-        - For FedAvg: scaled_state = global_state + scaling_factor * (local_state - global_state)
-        - For other algorithms: scaled_state = scaling_factor * local_state
-        
-        Args:
-            local_model_state: Current local model state dict
-            global_model_state: Global model state dict (for FedAvg scaling)
-            algorithm: FL algorithm type ('FedAvg', 'FedSGD', 'FedOpt', etc.)
-        
-        Returns:
-            Scaled model state dict
+        Apply Model Replacement scaling to model updates. (Bug-Fixed Version)
+        修复了导致非 FedAvg 算法下全局权重被放大 50 倍的灾难性 Bug，
+        并增加了对 BN 层非浮点参数的保护。
         """
         scaled_state = {}
-        
+
         with torch.no_grad():
             for key in local_model_state.keys():
+                # =================================================================
+                # 🛠️ BUG FIX 1: 绝对不能缩放 Batch Normalization 层的统计参数！
+                # 否则会导致模型内部前向传播时的均值和方差彻底错乱，引发 NaN。
+                # =================================================================
+                if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
+                    scaled_state[key] = local_model_state[key].clone()
+                    continue
+
                 local_param = local_model_state[key]
                 global_param = global_model_state.get(key, local_param.clone())
-                
-                if algorithm == 'FedAvg':
-                    # For FedAvg: scaled_update = global + scaling_factor * (local - global)
-                    # This makes the update replace the global model more effectively
-                    update = local_param - global_param
-                    scaled_param = global_param + self.scaling_factor * update
-                else:
-                    # For other algorithms: scaled_update = scaling_factor * local
-                    # This scales the entire local model
-                    scaled_param = self.scaling_factor * local_param
-                
-                scaled_state[key] = scaled_param
-        
-        return scaled_state
 
+                # =================================================================
+                # 🛠️ BUG FIX 2: 严格遵守差值缩放逻辑 (Strict Delta Scaling)
+                # 无论服务器用的是 FedAvg 还是 DnC、RLR，服务器提取梯度的方法都是 local - global。
+                # 所以我们必须始终通过放大更新量 (Delta) 来伪造 local_state。
+                # 绝对不能直接 `50 * local_param`！
+                # =================================================================
+
+                # 计算更新量 Delta
+                update = local_param.float() - global_param.float()
+
+                # 伪造放大后的客户端模型权重
+                scaled_param = global_param.float() + self.scaling_factor * update
+
+                # 还原至原始的数据类型
+                scaled_state[key] = scaled_param.to(local_param.dtype)
+
+        return scaled_state
 
 # class NeurotoxinAttack(BaseAttack):
 #     """
@@ -1145,255 +1184,418 @@ class NeurotoxinAttack(BaseAttack):
 
         return final_state
 
+# class EdgeCaseBackdoorAttack(BaseAttack):
+#     """
+#     Edge-case Backdoor Attack
+#
+#     [Attack of the Tails: Yes, You Really Can Backdoor Federated Learning](https://arxiv.org/abs/2007.05084) - NeurIPS '20
+#
+#     Edge-case backdoor attack utilizes edge-case samples from external datasets:
+#     - ARDIS for MNIST/FashionMNIST (Swedish historical handwritten digits, label 7 → target_label)
+#     - SouthwestAirline for CIFAR10 (airplane images → target_label)
+#
+#     This implementation includes both:
+#     1. Data poisoning: Replaces clean samples with edge-case samples from external datasets
+#     2. Model poisoning: PGD projection + scaling via apply_model_poisoning() method
+#
+#     The model poisoning logic (from FLPoison):
+#     - PGD projection: Projects update to stay within epsilon ball (L2 or L_inf norm)
+#     - Scaling attack: Scales the update by scaling_factor (same as Model Replacement)
+#     """
+#
+#     def __init__(self, config: Dict[str, Any]):
+#         super().__init__(config)
+#
+#         # Edge-case Backdoor specific parameters
+#         self.target_class = config.get('target_class', 1)
+#         self.dataset_name = config.get('dataset_name', 'mnist').lower()
+#         self.data_root = config.get('data_root', './data')
+#
+#         # Model poisoning parameters
+#         self.epsilon = config.get('epsilon', 0.25)  # PGD epsilon radius (default: 0.25 for MNIST, 0.083 for CIFAR10)
+#         self.projection_type = config.get('projection_type', 'l_2')  # 'l_2' or 'l_inf'
+#         self.PGD_attack = config.get('PGD_attack', True)  # Enable PGD projection
+#         self.scaling_attack = config.get('scaling_attack', True)  # Enable scaling attack
+#         self.scaling_factor = config.get('scaling_factor', 50)  # Scaling factor (default matches FLPoison)
+#         self.l2_proj_frequency = config.get('l2_proj_frequency', 1)  # Frequency for L2 projection (default: every epoch)
+#
+#         # Edge-case dataset samples (lazy loading)
+#         self.edge_case_samples = None
+#         self.edge_case_labels = None
+#         self.edge_case_idx = 0  # Index for cycling through edge-case samples
+#         self._load_edge_case_samples()
+#
+#     def get_data_type(self) -> str:
+#         return "image"
+#
+#     def _load_edge_case_samples(self):
+#         """Load edge-case samples from external datasets"""
+#         try:
+#             from .edge_case_datasets import load_edge_case_dataset
+#             self.edge_case_samples, self.edge_case_labels = load_edge_case_dataset(
+#                 self.dataset_name, self.target_class, self.data_root
+#             )
+#             # Ensure samples are in the correct format
+#             if isinstance(self.edge_case_samples, np.ndarray):
+#                 self.edge_case_samples = torch.from_numpy(self.edge_case_samples).float()
+#             if isinstance(self.edge_case_labels, np.ndarray):
+#                 self.edge_case_labels = torch.from_numpy(self.edge_case_labels).long()
+#         except (FileNotFoundError, ImportError) as e:
+#             raise RuntimeError(
+#                 f"Failed to load edge-case dataset for {self.dataset_name}. "
+#                 f"Please ensure edge-case datasets are downloaded and available. "
+#                 f"Error: {e}"
+#             )
+#
+#     def _apply_poison(self, clean_data: torch.Tensor, clean_labels: torch.Tensor,
+#                      poison_indices: torch.Tensor, poisoned_data: torch.Tensor,
+#                      poisoned_labels: torch.Tensor) -> None:
+#         """
+#         Replace clean samples with edge-case samples.
+#         This is different from trigger-based attacks - we replace entire samples.
+#         """
+#         if self.edge_case_samples is None or len(self.edge_case_samples) == 0:
+#             raise RuntimeError("Edge-case samples not loaded. Cannot apply poisoning.")
+#
+#         num_to_poison = len(poison_indices)
+#
+#         # Get edge-case samples (cycle through if needed)
+#         if self.edge_case_idx + num_to_poison <= len(self.edge_case_samples):
+#             # Enough samples available
+#             edge_samples = self.edge_case_samples[self.edge_case_idx:self.edge_case_idx + num_to_poison]
+#             edge_labels = self.edge_case_labels[self.edge_case_idx:self.edge_case_idx + num_to_poison]
+#             self.edge_case_idx += num_to_poison
+#         else:
+#             # Need to cycle through
+#             remaining = num_to_poison
+#             edge_samples_list = []
+#             edge_labels_list = []
+#
+#             while remaining > 0:
+#                 take = min(remaining, len(self.edge_case_samples) - self.edge_case_idx)
+#                 edge_samples_list.append(self.edge_case_samples[self.edge_case_idx:self.edge_case_idx + take])
+#                 edge_labels_list.append(self.edge_case_labels[self.edge_case_idx:self.edge_case_idx + take])
+#                 self.edge_case_idx = (self.edge_case_idx + take) % len(self.edge_case_samples)
+#                 remaining -= take
+#
+#             edge_samples = torch.cat(edge_samples_list, dim=0)
+#             edge_labels = torch.cat(edge_labels_list, dim=0)
+#
+#         # Ensure edge-case samples have the right shape and device
+#         # Edge-case samples might be [N, H, W] for MNIST or [N, H, W, C] for CIFAR10
+#         if edge_samples.dim() == 3:
+#             # MNIST: [N, H, W] -> [N, 1, H, W]
+#             edge_samples = edge_samples.unsqueeze(1)
+#         elif edge_samples.dim() == 4 and edge_samples.shape[1] != 3 and edge_samples.shape[-1] == 3:
+#             # CIFAR10: [N, H, W, C] -> [N, C, H, W]
+#             edge_samples = edge_samples.permute(0, 3, 1, 2)
+#
+#         # Normalize edge-case samples to [0, 1] if needed (they should already be)
+#         edge_samples = torch.clamp(edge_samples, 0.0, 1.0)
+#
+#         # Replace clean samples with edge-case samples
+#         edge_samples = edge_samples.to(poisoned_data.device)
+#         edge_labels = edge_labels.to(poisoned_labels.device)
+#
+#         poisoned_data[poison_indices] = edge_samples
+#         poisoned_labels[poison_indices] = edge_labels
+#
+#     def _vectorize_state_dict(self, state_dict: Dict[str, torch.Tensor]) -> np.ndarray:
+#         """Vectorize model state dict into a flat numpy array"""
+#         vec_list = []
+#         for key, param in state_dict.items():
+#             # Skip non-parameter tensors
+#             if 'num_batches_tracked' in key:
+#                 continue
+#             vec_list.append(param.detach().cpu().numpy().flatten())
+#         return np.concatenate(vec_list) if vec_list else np.array([])
+#
+#     def _unvectorize_to_state_dict(self, vector: np.ndarray,
+#                                    reference_state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+#         """Unvectorize flat numpy array back into model state dict"""
+#         state_dict = {}
+#         offset = 0
+#
+#         for key, param in reference_state.items():
+#             # Skip non-parameter tensors
+#             if 'num_batches_tracked' in key:
+#                 state_dict[key] = param.clone()
+#                 continue
+#
+#             numel = param.numel()
+#             param_vec = vector[offset:offset + numel]
+#             state_dict[key] = torch.from_numpy(param_vec.reshape(param.shape)).to(param.device, dtype=param.dtype)
+#             offset += numel
+#
+#         return state_dict
+#
+#     def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
+#                               global_model_state: Dict[str, torch.Tensor],
+#                               algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
+#         """
+#         Apply Edge-case Backdoor PGD projection and scaling to model updates.
+#
+#         This implements the model poisoning component of Edge-case Backdoor Attack.
+#         The method:
+#         1. Computes update: local_state - global_state
+#         2. Applies PGD projection (if enabled): Projects update to epsilon ball (L2 or L_inf)
+#         3. Applies scaling (if enabled): Scales the update by scaling_factor
+#
+#         Args:
+#             local_model_state: Current local model state dict
+#             global_model_state: Global model state dict
+#             algorithm: FL algorithm type ('FedAvg', 'FedSGD', 'FedOpt', etc.)
+#
+#         Returns:
+#             PGD-projected and/or scaled model state dict
+#         """
+#         # Compute update: local - global
+#         update_dict = {}
+#         for key in local_model_state.keys():
+#             if 'num_batches_tracked' in key:
+#                 continue
+#             if key in global_model_state:
+#                 update_dict[key] = local_model_state[key] - global_model_state[key]
+#             else:
+#                 update_dict[key] = local_model_state[key].clone()
+#
+#         # Vectorize the update for PGD projection
+#         update_vec = self._vectorize_state_dict(update_dict)
+#
+#         if len(update_vec) == 0:
+#             # If no valid parameters, return local model as-is
+#             return local_model_state
+#
+#         # Get global vector for scaling (needed later)
+#         global_vec = self._vectorize_state_dict(global_model_state)
+#
+#         # Step 1: Apply PGD projection (if enabled)
+#         # PGD projects the update (local - global) to stay within epsilon ball
+#         if self.PGD_attack:
+#             if self.projection_type == 'l_inf':
+#                 # L_inf projection: clip each coordinate of w_diff to [-epsilon, epsilon]
+#                 # Then reconstruct: projected_local = global + clipped(w_diff)
+#                 smaller_idx = update_vec < -self.epsilon
+#                 larger_idx = update_vec > self.epsilon
+#                 projected_update_vec = update_vec.copy()
+#                 projected_update_vec[smaller_idx] = -self.epsilon
+#                 projected_update_vec[larger_idx] = self.epsilon
+#             elif self.projection_type == 'l_2':
+#                 # L2 projection: project w_diff to epsilon ball if norm > epsilon
+#                 w_diff_norm = np.linalg.norm(update_vec)
+#                 if w_diff_norm > self.epsilon:
+#                     projected_update_vec = self.epsilon * update_vec / w_diff_norm
+#                 else:
+#                     projected_update_vec = update_vec
+#             else:
+#                 raise ValueError(f"Unknown projection_type: {self.projection_type}. "
+#                                f"Supported: 'l_2', 'l_inf'")
+#         else:
+#             # No PGD projection, use update as-is
+#             projected_update_vec = update_vec
+#
+#         # Step 2: Apply scaling (if enabled)
+#         # Note: In FLPoison, scaling is applied after PGD projection
+#         # projected_update_vec is (local - global) after PGD projection
+#         if self.scaling_attack:
+#             if algorithm == 'FedAvg':
+#                 # For FedAvg: scaled_update = global + scaling_factor * (local - global)
+#                 # Since projected_update_vec is (local - global) after PGD, we scale it
+#                 scaled_update_vec = self.scaling_factor * projected_update_vec
+#             else:
+#                 # For other algorithms: scaled_update = scaling_factor * update
+#                 # Where update is the local model (after PGD), not (local - global)
+#                 # So: projected_local = global + projected_update
+#                 # scaled_update = scaling_factor * projected_local
+#                 # But we need to return as (scaled_local - global)
+#                 projected_local_vec = global_vec + projected_update_vec
+#                 scaled_local_vec = self.scaling_factor * projected_local_vec
+#                 scaled_update_vec = scaled_local_vec - global_vec
+#         else:
+#             # No scaling, use projected update as-is
+#             scaled_update_vec = projected_update_vec
+#
+#         # Step 3: Unvectorize and add to global state
+#         scaled_update_dict = self._unvectorize_to_state_dict(scaled_update_vec, local_model_state)
+#
+#         # Final state: global + scaled_update
+#         final_state = {}
+#         with torch.no_grad():
+#             for key in local_model_state.keys():
+#                 if 'num_batches_tracked' in key:
+#                     # Keep tracking parameters from local model
+#                     final_state[key] = local_model_state[key].clone()
+#                     continue
+#
+#                 if key in global_model_state and key in scaled_update_dict:
+#                     final_state[key] = global_model_state[key] + scaled_update_dict[key]
+#                 elif key in local_model_state:
+#                     # Fallback: use local state if global not available
+#                     final_state[key] = local_model_state[key].clone()
+#
+#         return final_state
 class EdgeCaseBackdoorAttack(BaseAttack):
     """
-    Edge-case Backdoor Attack
-    
-    [Attack of the Tails: Yes, You Really Can Backdoor Federated Learning](https://arxiv.org/abs/2007.05084) - NeurIPS '20
-    
-    Edge-case backdoor attack utilizes edge-case samples from external datasets:
-    - ARDIS for MNIST/FashionMNIST (Swedish historical handwritten digits, label 7 → target_label)
-    - SouthwestAirline for CIFAR10 (airplane images → target_label)
-    
-    This implementation includes both:
-    1. Data poisoning: Replaces clean samples with edge-case samples from external datasets
-    2. Model poisoning: PGD projection + scaling via apply_model_poisoning() method
-    
-    The model poisoning logic (from FLPoison):
-    - PGD projection: Projects update to stay within epsilon ball (L2 or L_inf norm)
-    - Scaling attack: Scales the update by scaling_factor (same as Model Replacement)
+    Edge-case Backdoor Attack (Bug-Fixed Version)
+    修复了导致模型崩溃的暴力缩放 Bug 与导致特征断层的归一化 Bug。
     """
-    
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        
-        # Edge-case Backdoor specific parameters
         self.target_class = config.get('target_class', 1)
         self.dataset_name = config.get('dataset_name', 'mnist').lower()
         self.data_root = config.get('data_root', './data')
-        
-        # Model poisoning parameters
-        self.epsilon = config.get('epsilon', 0.25)  # PGD epsilon radius (default: 0.25 for MNIST, 0.083 for CIFAR10)
-        self.projection_type = config.get('projection_type', 'l_2')  # 'l_2' or 'l_inf'
-        self.PGD_attack = config.get('PGD_attack', True)  # Enable PGD projection
-        self.scaling_attack = config.get('scaling_attack', True)  # Enable scaling attack
-        self.scaling_factor = config.get('scaling_factor', 50)  # Scaling factor (default matches FLPoison)
-        self.l2_proj_frequency = config.get('l2_proj_frequency', 1)  # Frequency for L2 projection (default: every epoch)
-        
-        # Edge-case dataset samples (lazy loading)
+
+        self.epsilon = config.get('epsilon', 0.25)
+        self.projection_type = config.get('projection_type', 'l_2')
+        self.PGD_attack = config.get('PGD_attack', True)
+        self.scaling_attack = config.get('scaling_attack', True)
+        self.scaling_factor = config.get('scaling_factor', 50)
+        self.l2_proj_frequency = config.get('l2_proj_frequency', 1)
+
         self.edge_case_samples = None
         self.edge_case_labels = None
-        self.edge_case_idx = 0  # Index for cycling through edge-case samples
+        self.edge_case_idx = 0
         self._load_edge_case_samples()
-    
+
     def get_data_type(self) -> str:
         return "image"
-    
+
     def _load_edge_case_samples(self):
-        """Load edge-case samples from external datasets"""
         try:
             from .edge_case_datasets import load_edge_case_dataset
             self.edge_case_samples, self.edge_case_labels = load_edge_case_dataset(
                 self.dataset_name, self.target_class, self.data_root
             )
-            # Ensure samples are in the correct format
             if isinstance(self.edge_case_samples, np.ndarray):
                 self.edge_case_samples = torch.from_numpy(self.edge_case_samples).float()
             if isinstance(self.edge_case_labels, np.ndarray):
                 self.edge_case_labels = torch.from_numpy(self.edge_case_labels).long()
         except (FileNotFoundError, ImportError) as e:
-            raise RuntimeError(
-                f"Failed to load edge-case dataset for {self.dataset_name}. "
-                f"Please ensure edge-case datasets are downloaded and available. "
-                f"Error: {e}"
-            )
-    
-    def _apply_poison(self, clean_data: torch.Tensor, clean_labels: torch.Tensor, 
-                     poison_indices: torch.Tensor, poisoned_data: torch.Tensor, 
-                     poisoned_labels: torch.Tensor) -> None:
-        """
-        Replace clean samples with edge-case samples.
-        This is different from trigger-based attacks - we replace entire samples.
-        """
+            raise RuntimeError(f"Failed to load edge-case dataset: {e}")
+
+    def _apply_poison(self, clean_data: torch.Tensor, clean_labels: torch.Tensor,
+                      poison_indices: torch.Tensor, poisoned_data: torch.Tensor,
+                      poisoned_labels: torch.Tensor) -> None:
         if self.edge_case_samples is None or len(self.edge_case_samples) == 0:
-            raise RuntimeError("Edge-case samples not loaded. Cannot apply poisoning.")
-        
+            raise RuntimeError("Edge-case samples not loaded.")
+
         num_to_poison = len(poison_indices)
-        
-        # Get edge-case samples (cycle through if needed)
+
+        # [安全修复]：必须使用 .clone()，防止原地修改污染缓存的源数据集
         if self.edge_case_idx + num_to_poison <= len(self.edge_case_samples):
-            # Enough samples available
-            edge_samples = self.edge_case_samples[self.edge_case_idx:self.edge_case_idx + num_to_poison]
-            edge_labels = self.edge_case_labels[self.edge_case_idx:self.edge_case_idx + num_to_poison]
+            edge_samples = self.edge_case_samples[self.edge_case_idx:self.edge_case_idx + num_to_poison].clone()
+            edge_labels = self.edge_case_labels[self.edge_case_idx:self.edge_case_idx + num_to_poison].clone()
             self.edge_case_idx += num_to_poison
         else:
-            # Need to cycle through
             remaining = num_to_poison
             edge_samples_list = []
             edge_labels_list = []
-            
             while remaining > 0:
                 take = min(remaining, len(self.edge_case_samples) - self.edge_case_idx)
-                edge_samples_list.append(self.edge_case_samples[self.edge_case_idx:self.edge_case_idx + take])
-                edge_labels_list.append(self.edge_case_labels[self.edge_case_idx:self.edge_case_idx + take])
+                edge_samples_list.append(self.edge_case_samples[self.edge_case_idx:self.edge_case_idx + take].clone())
+                edge_labels_list.append(self.edge_case_labels[self.edge_case_idx:self.edge_case_idx + take].clone())
                 self.edge_case_idx = (self.edge_case_idx + take) % len(self.edge_case_samples)
                 remaining -= take
-            
             edge_samples = torch.cat(edge_samples_list, dim=0)
             edge_labels = torch.cat(edge_labels_list, dim=0)
-        
-        # Ensure edge-case samples have the right shape and device
-        # Edge-case samples might be [N, H, W] for MNIST or [N, H, W, C] for CIFAR10
+
         if edge_samples.dim() == 3:
-            # MNIST: [N, H, W] -> [N, 1, H, W]
             edge_samples = edge_samples.unsqueeze(1)
         elif edge_samples.dim() == 4 and edge_samples.shape[1] != 3 and edge_samples.shape[-1] == 3:
-            # CIFAR10: [N, H, W, C] -> [N, C, H, W]
             edge_samples = edge_samples.permute(0, 3, 1, 2)
-        
-        # Normalize edge-case samples to [0, 1] if needed (they should already be)
+
         edge_samples = torch.clamp(edge_samples, 0.0, 1.0)
-        
-        # Replace clean samples with edge-case samples
+
+        # =================================================================
+        # 🛠️ BUG FIX 1: 归一化对齐 (Normalization Alignment)
+        # 必须使用与主线数据相同的 Mean 和 Std 对 Edge-case 样本进行归一化，否则模型无法识别特征
+        # =================================================================
+        if hasattr(self, 'mean') and hasattr(self, 'std') and self.mean is not None:
+            import torchvision.transforms.functional as TF
+            for i in range(len(edge_samples)):
+                edge_samples[i] = TF.normalize(edge_samples[i], self.mean, self.std)
+
         edge_samples = edge_samples.to(poisoned_data.device)
         edge_labels = edge_labels.to(poisoned_labels.device)
-        
+
         poisoned_data[poison_indices] = edge_samples
         poisoned_labels[poison_indices] = edge_labels
-    
+
     def _vectorize_state_dict(self, state_dict: Dict[str, torch.Tensor]) -> np.ndarray:
-        """Vectorize model state dict into a flat numpy array"""
         vec_list = []
         for key, param in state_dict.items():
-            # Skip non-parameter tensors
-            if 'num_batches_tracked' in key:
-                continue
+            if 'num_batches_tracked' in key: continue
             vec_list.append(param.detach().cpu().numpy().flatten())
         return np.concatenate(vec_list) if vec_list else np.array([])
-    
-    def _unvectorize_to_state_dict(self, vector: np.ndarray, 
+
+    def _unvectorize_to_state_dict(self, vector: np.ndarray,
                                    reference_state: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """Unvectorize flat numpy array back into model state dict"""
         state_dict = {}
         offset = 0
-        
         for key, param in reference_state.items():
-            # Skip non-parameter tensors
             if 'num_batches_tracked' in key:
                 state_dict[key] = param.clone()
                 continue
-            
             numel = param.numel()
             param_vec = vector[offset:offset + numel]
             state_dict[key] = torch.from_numpy(param_vec.reshape(param.shape)).to(param.device, dtype=param.dtype)
             offset += numel
-        
         return state_dict
-    
-    def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor], 
+
+    def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
                               global_model_state: Dict[str, torch.Tensor],
                               algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
-        """
-        Apply Edge-case Backdoor PGD projection and scaling to model updates.
-        
-        This implements the model poisoning component of Edge-case Backdoor Attack.
-        The method:
-        1. Computes update: local_state - global_state
-        2. Applies PGD projection (if enabled): Projects update to epsilon ball (L2 or L_inf)
-        3. Applies scaling (if enabled): Scales the update by scaling_factor
-        
-        Args:
-            local_model_state: Current local model state dict
-            global_model_state: Global model state dict
-            algorithm: FL algorithm type ('FedAvg', 'FedSGD', 'FedOpt', etc.)
-        
-        Returns:
-            PGD-projected and/or scaled model state dict
-        """
-        # Compute update: local - global
         update_dict = {}
         for key in local_model_state.keys():
-            if 'num_batches_tracked' in key:
-                continue
+            if 'num_batches_tracked' in key: continue
             if key in global_model_state:
                 update_dict[key] = local_model_state[key] - global_model_state[key]
             else:
                 update_dict[key] = local_model_state[key].clone()
-        
-        # Vectorize the update for PGD projection
+
         update_vec = self._vectorize_state_dict(update_dict)
-        
-        if len(update_vec) == 0:
-            # If no valid parameters, return local model as-is
-            return local_model_state
-        
-        # Get global vector for scaling (needed later)
-        global_vec = self._vectorize_state_dict(global_model_state)
-        
-        # Step 1: Apply PGD projection (if enabled)
-        # PGD projects the update (local - global) to stay within epsilon ball
+        if len(update_vec) == 0: return local_model_state
+
+        # Step 1: PGD Projection
         if self.PGD_attack:
             if self.projection_type == 'l_inf':
-                # L_inf projection: clip each coordinate of w_diff to [-epsilon, epsilon]
-                # Then reconstruct: projected_local = global + clipped(w_diff)
                 smaller_idx = update_vec < -self.epsilon
                 larger_idx = update_vec > self.epsilon
                 projected_update_vec = update_vec.copy()
                 projected_update_vec[smaller_idx] = -self.epsilon
                 projected_update_vec[larger_idx] = self.epsilon
             elif self.projection_type == 'l_2':
-                # L2 projection: project w_diff to epsilon ball if norm > epsilon
                 w_diff_norm = np.linalg.norm(update_vec)
                 if w_diff_norm > self.epsilon:
                     projected_update_vec = self.epsilon * update_vec / w_diff_norm
                 else:
                     projected_update_vec = update_vec
-            else:
-                raise ValueError(f"Unknown projection_type: {self.projection_type}. "
-                               f"Supported: 'l_2', 'l_inf'")
         else:
-            # No PGD projection, use update as-is
             projected_update_vec = update_vec
-        
-        # Step 2: Apply scaling (if enabled)
-        # Note: In FLPoison, scaling is applied after PGD projection
-        # projected_update_vec is (local - global) after PGD projection
+
+        # =================================================================
+        # 🛠️ BUG FIX 2: 严格更新量缩放 (Strict Delta Scaling)
+        # 无论什么算法，绝对不能去缩放 global_weights 本身！只准缩放更新量 (delta)！
+        # =================================================================
         if self.scaling_attack:
-            if algorithm == 'FedAvg':
-                # For FedAvg: scaled_update = global + scaling_factor * (local - global)
-                # Since projected_update_vec is (local - global) after PGD, we scale it
-                scaled_update_vec = self.scaling_factor * projected_update_vec
-            else:
-                # For other algorithms: scaled_update = scaling_factor * update
-                # Where update is the local model (after PGD), not (local - global)
-                # So: projected_local = global + projected_update
-                # scaled_update = scaling_factor * projected_local
-                # But we need to return as (scaled_local - global)
-                projected_local_vec = global_vec + projected_update_vec
-                scaled_local_vec = self.scaling_factor * projected_local_vec
-                scaled_update_vec = scaled_local_vec - global_vec
+            scaled_update_vec = self.scaling_factor * projected_update_vec
         else:
-            # No scaling, use projected update as-is
             scaled_update_vec = projected_update_vec
-        
-        # Step 3: Unvectorize and add to global state
+
         scaled_update_dict = self._unvectorize_to_state_dict(scaled_update_vec, local_model_state)
-        
-        # Final state: global + scaled_update
+
         final_state = {}
         with torch.no_grad():
             for key in local_model_state.keys():
                 if 'num_batches_tracked' in key:
-                    # Keep tracking parameters from local model
                     final_state[key] = local_model_state[key].clone()
                     continue
-                
                 if key in global_model_state and key in scaled_update_dict:
                     final_state[key] = global_model_state[key] + scaled_update_dict[key]
                 elif key in local_model_state:
-                    # Fallback: use local state if global not available
                     final_state[key] = local_model_state[key].clone()
-        
+
         return final_state
 
 
@@ -2233,6 +2435,660 @@ class LayerwisePoisoningAttack(BadNetsAttack):
             else:
                 # 💥 杀招 2：非关键层隐蔽 (Delta=0)
                 poisoned_state[key] = global_model_state[key].clone()
+
+        return poisoned_state
+
+
+import torch
+
+
+class MinMaxAttack:
+    def __init__(self, dev_type='std'):
+        """
+        dev_type: 扰动向量的类型，可选 'std' (标准差反向), 'sign' (符号反向), 'unit' (单位向量反向)
+        论文中最常用且对 Non-IID 效果最好的是 'std'
+        """
+        self.dev_type = dev_type
+
+    def _flatten_weights(self, weights_dict):
+        """将 state_dict 字典展平为 1D Tensor"""
+        return torch.cat([v.flatten() for v in weights_dict.values()])
+
+    def _unflatten_weights(self, flat_tensor, template_dict):
+        """将 1D Tensor 还原为 state_dict 字典"""
+        unflat_dict = {}
+        idx = 0
+        for k, v in template_dict.items():
+            numel = v.numel()
+            unflat_dict[k] = flat_tensor[idx:idx + numel].view_as(v).clone()
+            idx += numel
+        return unflat_dict
+
+    def apply_attack(self, malicious_local_updates):
+        """
+        malicious_local_updates: List[dict]
+        包含所有恶意客户端在本地正常训练后的权重更新（用作估算全局良性分布的代理）
+        """
+        # 1. 展平所有恶意客户端的权重
+        flat_updates = [self._flatten_weights(w) for w in malicious_local_updates]
+        stacked_updates = torch.stack(flat_updates)  # Shape: (num_attackers, num_params)
+
+        # 2. 估算良性分布的均值 (mu)
+        mu = torch.mean(stacked_updates, dim=0)
+
+        # 3. 计算扰动方向 (v_p)
+        if self.dev_type == 'sign':
+            deviation = -torch.sign(mu)
+        elif self.dev_type == 'std':
+            deviation = -torch.std(stacked_updates, dim=0)
+        elif self.dev_type == 'unit':
+            deviation = -mu / (torch.norm(mu) + 1e-8)
+        else:
+            deviation = -torch.std(stacked_updates, dim=0)
+
+        # 4. 计算“安全半径”（任意两个本地更新之间的最大欧式距离）
+        distances = torch.cdist(stacked_updates, stacked_updates, p=2.0)
+        max_distance = torch.max(distances)
+
+        # 5. 二分查找 (Binary Search) 寻找最大的 gamma
+        gamma_succ = 0.0
+        gamma_fail = 100.0  # 初始上限，可根据具体模型收敛情况调大
+        gamma = gamma_fail / 2.0
+        threshold = 1e-4
+
+        while abs(gamma_fail - gamma_succ) > threshold:
+            # 构造候选恶意向量
+            candidate_malicious = mu + gamma * deviation
+
+            # 计算候选向量到所有已知本地更新的距离
+            dist_to_locals = torch.norm(stacked_updates - candidate_malicious, dim=1)
+
+            # 如果候选向量到所有已知更新的距离都在安全半径内
+            if torch.max(dist_to_locals) <= max_distance:
+                gamma_succ = gamma
+                gamma = gamma + (gamma_fail - gamma) / 2.0
+            else:
+                gamma_fail = gamma
+                gamma = gamma - (gamma - gamma_succ) / 2.0
+
+        # 6. 生成最终的恶意更新向量
+        best_malicious_flat = mu + gamma_succ * deviation
+
+        # 7. 还原为 state_dict 并返回（所有恶意客户端将上传这同一个字典）
+        template = malicious_local_updates[0]
+        malicious_state_dict = self._unflatten_weights(best_malicious_flat, template)
+
+        return malicious_state_dict
+
+
+import torch
+
+
+class TrimAttack:
+    """
+    专门针对 Trimmed Mean 和 Median 聚合规则的局部模型投毒攻击
+    """
+
+    def __init__(self, num_attackers=1, num_total_clients=10, b=2.0):
+        self.num_attackers = num_attackers
+        self.num_total = num_total_clients
+        self.b = b  # 控制参数在边缘的系数，默认 2 倍标准差
+
+    def _flatten_weights(self, weights_dict):
+        return torch.cat([v.flatten() for v in weights_dict.values()])
+
+    def _unflatten_weights(self, flat_tensor, template_dict):
+        unflat_dict = {}
+        idx = 0
+        for k, v in template_dict.items():
+            numel = v.numel()
+            unflat_dict[k] = flat_tensor[idx:idx + numel].view_as(v).clone()
+            idx += numel
+        return unflat_dict
+
+    def apply_attack(self, malicious_local_updates):
+        # 1. 展平并计算参考分布
+        flat_updates = torch.stack([self._flatten_weights(w) for w in malicious_local_updates])
+        mu = torch.mean(flat_updates, dim=0)
+        std = torch.std(flat_updates, dim=0) + 1e-9
+
+        # 2. 均值反方向偏移
+        direction = torch.sign(mu)
+
+        # 3. 将恶意参数推到修剪边界
+        best_malicious_flat = mu - self.b * std * direction
+
+        return self._unflatten_weights(best_malicious_flat, malicious_local_updates[0])
+
+
+class KrumAttack:
+    """
+    专门针对 Krum 聚合规则的局部模型投毒攻击
+    """
+
+    def __init__(self, num_attackers=1, num_total_clients=10):
+        self.num_attackers = num_attackers
+        self.num_total = num_total_clients
+
+    def _flatten_weights(self, weights_dict):
+        return torch.cat([v.flatten() for v in weights_dict.values()])
+
+    def _unflatten_weights(self, flat_tensor, template_dict):
+        unflat_dict = {}
+        idx = 0
+        for k, v in template_dict.items():
+            numel = v.numel()
+            unflat_dict[k] = flat_tensor[idx:idx + numel].view_as(v).clone()
+            idx += numel
+        return unflat_dict
+
+    def apply_attack(self, malicious_local_updates):
+        # 1. 展平并计算参考分布
+        flat_updates = torch.stack([self._flatten_weights(w) for w in malicious_local_updates])
+        mu = torch.mean(flat_updates, dim=0)
+        std = torch.std(flat_updates, dim=0) + 1e-9
+        direction = torch.sign(mu)
+
+        # 2. 初始化二分查找参数
+        gamma_succ = 0.0
+        gamma_fail = 3.0
+        gamma = gamma_fail / 2.0
+        threshold = 1e-4
+
+        # Krum 算法选择距离最近的邻居数量
+        krum_k = max(1, self.num_total - self.num_attackers - 2)
+
+        def calc_krum_score(target_vec, pool_benign, cand_vec, num_mal):
+            dists_to_benign = torch.cdist(target_vec.unsqueeze(0), pool_benign)[0]
+            dists_to_mal = torch.cdist(target_vec.unsqueeze(0), cand_vec.unsqueeze(0))[0].repeat(num_mal)
+            all_dists = torch.cat([dists_to_benign, dists_to_mal])
+            all_dists, _ = torch.sort(all_dists)
+            return torch.sum(all_dists[1:krum_k + 1])
+
+        # 3. 二分查找寻找最优 gamma
+        while abs(gamma_fail - gamma_succ) > threshold:
+            candidate = mu - gamma * std * direction
+
+            score_candidate = calc_krum_score(candidate, flat_updates, candidate, self.num_attackers)
+            score_benign = calc_krum_score(mu, flat_updates, candidate, self.num_attackers)
+
+            if score_candidate < score_benign:
+                gamma_succ = gamma
+                gamma = gamma + (gamma_fail - gamma) / 2.0
+            else:
+                gamma_fail = gamma
+                gamma = gamma - (gamma - gamma_succ) / 2.0
+
+        # 4. 生成最终权重
+        best_malicious_flat = mu - gamma_succ * std * direction
+        return self._unflatten_weights(best_malicious_flat, malicious_local_updates[0])
+
+
+import torch
+import copy
+
+
+class CerPAttack:
+    """
+    CerP: Stealthy and Colluded Backdoor Attack against Federated Learning (AAAI 2023)
+    核心机制: 分布式触发器切分 + 隐蔽性模型约束
+    """
+
+    def __init__(self, config):
+        self.config = config
+        self.name = 'CerPAttack'
+        self.target_class = config.get('target_class', 0)
+        self.client_id = config.get('client_id')
+        self.adversarial_clients = config.get('apply_to_client_ids', [])
+
+        # 确定当前恶意客户端在所有恶意客户端中的索引
+        if self.client_id in self.adversarial_clients:
+            self.attacker_idx = self.adversarial_clients.index(self.client_id)
+        else:
+            self.attacker_idx = 0
+
+        self.num_attackers = max(1, len(self.adversarial_clients))
+        self.trigger_size = config.get('trigger_width', 4)  # 假设为正方形触发器
+        self.epsilon = config.get('epsilon', 0.5)  # 隐蔽性约束的 L2 范数阈值
+
+    def should_apply(self, round_idx):
+        """判断当前轮次是否触发攻击"""
+        start = self.config.get('attack_start_round', 0)
+        stop = self.config.get('attack_stop_round', 1000)
+        freq = self.config.get('attack_frequency', 1)
+        return (round_idx >= start) and (round_idx < stop) and ((round_idx - start) % freq == 0)
+
+    def poison_data(self, data, target):
+        """
+        数据投毒：CerP 核心逻辑 1 - 分布式触发器
+        将一个 trigger 划分为多个 sub-trigger，交由不同的 client 执行。
+        为了简单起见，我们将右下角的触发器区域按 attacker_idx 分配不同的像素点或小块。
+        """
+        poisoned_data = data.clone()
+        poisoned_target = target.clone()
+
+        batch_size = data.size(0)
+        channels, height, width = data.size()[1:]
+
+        # 定义全局触发器区域 (右下角)
+        start_h = height - self.trigger_size
+        start_w = width - self.trigger_size
+
+        # 简单的切分逻辑：将触发器区域横向切分为多个小条块，每个 attacker 负责一条
+        # 这样组合起来才是一个完整的特征
+        chunk_size = max(1, self.trigger_size // self.num_attackers)
+        my_chunk_start = self.attacker_idx * chunk_size
+        my_chunk_end = my_chunk_start + chunk_size if self.attacker_idx < self.num_attackers - 1 else self.trigger_size
+
+        # 只有特定的后门比例才会被投毒
+        poison_ratio = self.config.get('poison_ratio', 0.5)
+        num_poisoned = int(batch_size * poison_ratio)
+
+        if num_poisoned > 0:
+            # 修改标签
+            poisoned_target[:num_poisoned] = self.target_class
+
+            # 添加属于该 attacker 的局部触发器 (最高亮度 / 特定像素值)
+            # 在标准化后的图像中，2.5 通常代表接近全白的像素
+            for i in range(num_poisoned):
+                for c in range(channels):
+                    poisoned_data[i, c,
+                    start_h + my_chunk_start: start_h + my_chunk_end,
+                    start_w: start_w + self.trigger_size] = 2.5
+
+        return poisoned_data, poisoned_target
+
+    def apply_model_poisoning(self, local_model_state, global_model_state, algorithm):
+        """
+        模型投毒：CerP 核心逻辑 2 - 隐蔽性约束 (Stealthy Tuning)
+        通过投影 (Projection) 将本地模型的更新限制在全局模型的一个安全半径 (epsilon) 内，
+        从而骗过 Krum, Trimmed Mean 等鲁棒聚合算法。
+        """
+        poisoned_state = {}
+
+        # 计算当前本地模型与全局模型的差值 (更新量)
+        update_vector = []
+        for k in local_model_state.keys():
+            diff = local_model_state[k] - global_model_state[k]
+            update_vector.append(diff.view(-1))
+
+        update_vector = torch.cat(update_vector)
+        l2_norm = torch.norm(update_vector, p=2)
+
+        # 如果更新幅度超过了安全阈值 epsilon，则进行缩放投影 (Clipping)
+        if l2_norm > self.epsilon:
+            scale_factor = self.epsilon / (l2_norm + 1e-9)
+            print(f"   [CerP] Client {self.client_id} clipping model update (Norm {l2_norm:.2f} -> {self.epsilon})")
+
+            for k in local_model_state.keys():
+                diff = local_model_state[k] - global_model_state[k]
+                poisoned_state[k] = global_model_state[k] + diff * scale_factor
+        else:
+            poisoned_state = copy.deepcopy(local_model_state)
+
+        return poisoned_state
+
+
+import torch
+import torch.nn as nn
+
+
+class A3FLAttack:
+    """
+    A3FL: Adversarially Adaptive Backdoor Attacks to Federated Learning
+    核心机制：在本地训练前，通过对抗性梯度更新，动态优化出一个具有抗遗忘能力的触发器补丁。
+    """
+
+    def __init__(self, config):
+        self.config = config
+        self.name = 'A3FLAttack'
+        self.target_class = config.get('target_class', 0)
+        self.client_id = config.get('client_id')
+        self.apply_to_client_ids = config.get('apply_to_client_ids', [])
+
+        self.trigger_height = config.get('trigger_height', 5)
+        self.trigger_width = config.get('trigger_width', 5)
+
+        # 初始化一个可优化的触发器补丁 (Trigger Patch)
+        self.trigger_patch = None
+
+    def should_apply(self, round_idx):
+        start = self.config.get('attack_start_round', 0)
+        stop = self.config.get('attack_stop_round', 1000)
+        freq = self.config.get('attack_frequency', 1)
+        return (round_idx >= start) and (round_idx < stop) and ((round_idx - start) % freq == 0)
+
+    def train_attack_model(self, model, dataloader, client_id, device, verbose=False):
+        """
+        利用您框架中的钩子，在本地正常训练前，先执行 A3FL 的触发器对抗优化。
+        """
+        if client_id not in self.apply_to_client_ids:
+            return
+
+        print(f"   [A3FL] Optimizing Adversarially Adaptive Trigger for client {client_id}...")
+
+        # 冻结模型参数，只优化触发器补丁
+        model.eval()
+        for param in model.parameters():
+            param.requires_grad = False
+
+        if self.trigger_patch is None:
+            # 假设输入通道为3 (CIFAR-10)
+            self.trigger_patch = torch.zeros((3, self.trigger_height, self.trigger_width), device=device,
+                                             requires_grad=True)
+        else:
+            self.trigger_patch = self.trigger_patch.detach().clone().to(device)
+            self.trigger_patch.requires_grad = True
+
+        optimizer_trigger = torch.optim.Adam([self.trigger_patch], lr=0.01)
+        criterion = nn.CrossEntropyLoss()
+
+        # A3FL 的代理对抗优化：寻找最能激活后门目标的 Trigger 扰动
+        # 在完整论文中，这里包含针对 unlearning 的 minimax 优化
+        epochs = self.config.get('adv_epochs', 3)
+        for epoch in range(epochs):
+            for data, target in dataloader:
+                data = data.to(device)
+
+                batch_size = data.size(0)
+                poison_ratio = self.config.get('poison_ratio', 0.5)
+                num_poison = int(batch_size * poison_ratio)
+                if num_poison == 0: continue
+
+                poisoned_data = data[:num_poison].clone()
+                channels, h, w = poisoned_data.shape[1:]
+                start_h, start_w = h - self.trigger_height, w - self.trigger_width
+
+                # 将当前正在优化的补丁叠加到图像上
+                poisoned_data[:, :, start_h:, start_w:] = poisoned_data[:, :, start_h:, start_w:] + self.trigger_patch
+
+                # 伪造全为目标类的标签
+                poisoned_target = torch.ones(num_poison, dtype=torch.long, device=device) * self.target_class
+
+                optimizer_trigger.zero_grad()
+                output = model(poisoned_data)
+
+                # 优化目标：使得带触发器的图像被识别为目标类的置信度最大化
+                loss = criterion(output, poisoned_target)
+                loss.backward()
+                optimizer_trigger.step()
+
+                # 对触发器进行 L_inf 约束，保证隐蔽性 (假设图像被标准化，这里的扰动约束设为 0.5)
+                with torch.no_grad():
+                    self.trigger_patch.clamp_(-0.5, 0.5)
+
+        self.trigger_patch.requires_grad = False
+
+        # 恢复模型为训练状态，供后续的 FLClient.train 正常使用
+        for param in model.parameters():
+            param.requires_grad = True
+        model.train()
+
+    def poison_data(self, data, target):
+        """在实际的数据加载循环中，贴上刚刚优化好的自适应触发器"""
+        poisoned_data = data.clone()
+        poisoned_target = target.clone()
+
+        batch_size = data.size(0)
+        poison_ratio = self.config.get('poison_ratio', 0.5)
+        num_poisoned = int(batch_size * poison_ratio)
+
+        if num_poisoned > 0 and self.trigger_patch is not None:
+            poisoned_target[:num_poisoned] = self.target_class
+
+            channels, h, w = poisoned_data.shape[1:]
+            start_h, start_w = h - self.trigger_height, w - self.trigger_width
+
+            device = poisoned_data.device
+            optimized_patch = self.trigger_patch.to(device)
+
+            # 叠加自适应触发器
+            poisoned_data[:num_poisoned, :, start_h:, start_w:] = poisoned_data[:num_poisoned, :, start_h:,
+                                                                  start_w:] + optimized_patch
+
+        return poisoned_data, poisoned_target
+
+    def apply_model_poisoning(self, local_model_state, global_model_state, algorithm):
+        """A3FL 是自适应触发器攻击，可选择结合模型缩放 (Scaling) 增加破坏力"""
+        scaling_factor = self.config.get('scaling_factor', 1)
+        if scaling_factor > 1:
+            poisoned_state = {}
+            for k in local_model_state.keys():
+                diff = local_model_state[k] - global_model_state[k]
+                poisoned_state[k] = global_model_state[k] + diff * scaling_factor
+            return poisoned_state
+        return local_model_state
+
+
+import torch
+import copy
+
+
+class FCBAAttack:
+    """
+    FCBA: Full Combination Backdoor Attack (AAAI 2024)
+    核心机制：通过组合多个触发器特征（如多位置、多通道模式），构建更完整、更难被良性更新洗掉的持久性后门。
+    """
+
+    def __init__(self, config):
+        self.config = config
+        self.name = 'FCBAAttack'
+        self.target_class = config.get('target_class', 0)
+        self.client_id = config.get('client_id')
+        self.apply_to_client_ids = config.get('apply_to_client_ids', [])
+
+        # FCBA 组合触发器的基础大小
+        self.trigger_size = config.get('trigger_width', 4)
+        self.scaling_factor = config.get('scaling_factor', 1)
+
+    def should_apply(self, round_idx):
+        start = self.config.get('attack_start_round', 0)
+        stop = self.config.get('attack_stop_round', 1000)
+        freq = self.config.get('attack_frequency', 1)
+        return (round_idx >= start) and (round_idx < stop) and ((round_idx - start) % freq == 0)
+
+    def poison_data(self, data, target):
+        """
+        数据投毒：FCBA 核心逻辑 - 植入全组合触发器 (Full Combination Trigger)
+        为了实现组合特征，我们在图像的多个关键位置（如四个角）同时植入触发器，
+        或者使用特定的强通道组合，使模型必须学习这个"完整模式"才能触发后门。
+        """
+        poisoned_data = data.clone()
+        poisoned_target = target.clone()
+
+        batch_size = data.size(0)
+        channels, height, width = data.size()[1:]
+
+        poison_ratio = self.config.get('poison_ratio', 0.5)
+        num_poisoned = int(batch_size * poison_ratio)
+
+        if num_poisoned > 0:
+            # 修改标签为目标类别
+            poisoned_target[:num_poisoned] = self.target_class
+
+            # 植入组合触发器：在四个角同时添加特征块，形成复杂的全局模式
+            # (相较于单一角落的 BadNets，这种组合模式在卷积网络中更难被遗忘)
+            pixel_val = 2.5  # 标准化后的高亮像素
+
+            # 左上角 (Top-Left)
+            poisoned_data[:num_poisoned, :, 0:self.trigger_size, 0:self.trigger_size] = pixel_val
+            # 右上角 (Top-Right)
+            poisoned_data[:num_poisoned, :, 0:self.trigger_size, width - self.trigger_size:width] = pixel_val
+            # 左下角 (Bottom-Left)
+            poisoned_data[:num_poisoned, :, height - self.trigger_size:height, 0:self.trigger_size] = pixel_val
+            # 右下角 (Bottom-Right)
+            poisoned_data[:num_poisoned, :, height - self.trigger_size:height,
+            width - self.trigger_size:width] = pixel_val
+
+        return poisoned_data, poisoned_target
+
+    def apply_model_poisoning(self, local_model_state, global_model_state, algorithm):
+        """
+        模型投毒：为了确保这些组合特征能在全局模型中占据主导地位，
+        结合一定的 Scaling 放大恶意权重更新。
+        """
+        if self.scaling_factor <= 1:
+            return local_model_state
+
+        poisoned_state = {}
+        for k in local_model_state.keys():
+            diff = local_model_state[k] - global_model_state[k]
+            poisoned_state[k] = global_model_state[k] + diff * self.scaling_factor
+
+        return poisoned_state
+
+
+import torch
+import torch.nn as nn
+import copy
+
+
+class IBAGenerator(nn.Module):
+    """
+    用于生成 IBA 实例相关隐蔽触发器的轻量级生成器
+    """
+
+    def __init__(self, channels=3):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(channels, 16, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+        )
+        self.decoder = nn.Sequential(
+            nn.Conv2d(16, channels, kernel_size=3, stride=1, padding=1),
+            nn.Tanh()  # 确保输出范围在 [-1, 1] 之间，便于控制 L_inf 范数
+        )
+
+    def forward(self, x):
+        x = self.encoder(x)
+        return self.decoder(x)
+
+
+class IBAAttack:
+    """
+    IBA: Towards Irreversible Backdoor Attacks in Federated Learning (NeurIPS 2023)
+    核心机制: 生成式隐蔽触发器 (Trigger Generating) + PGD受约模型投毒 (Partial Model Poisoning)
+    """
+
+    def __init__(self, config):
+        self.config = config
+        self.name = 'IBAAttack'
+        self.target_class = config.get('target_class', 0)
+        self.client_id = config.get('client_id')
+        self.apply_to_client_ids = config.get('apply_to_client_ids', [])
+
+        self.epsilon = config.get('epsilon', 0.1)  # 视觉隐蔽性 L_inf 阈值
+        self.pgd_bound = config.get('pgd_bound', 2.0)  # PGD 模型空间约束半径
+        self.scaling_factor = config.get('scaling_factor', 1)  # Model Replacement 放缩倍数
+
+        self.generator = None
+
+    def should_apply(self, round_idx):
+        start = self.config.get('attack_start_round', 0)
+        stop = self.config.get('attack_stop_round', 1000)
+        freq = self.config.get('attack_frequency', 1)
+        return (round_idx >= start) and (round_idx < stop) and ((round_idx - start) % freq == 0)
+
+    def train_attack_model(self, model, dataloader, client_id, device, verbose=False):
+        """阶段 1：利用全局模型训练本地的触发器生成器"""
+        if client_id not in self.apply_to_client_ids:
+            return
+
+        print(f"   [IBA] Training instance-specific trigger generator for client {client_id}...")
+
+        # 冻结当前的全局分类模型参数
+        model.eval()
+        for param in model.parameters():
+            param.requires_grad = False
+
+        # 初始化生成器
+        if self.generator is None:
+            # 动态获取图像通道数
+            sample_data, _ = next(iter(dataloader))
+            channels = sample_data.shape[1]
+            self.generator = IBAGenerator(channels).to(device)
+
+        self.generator.train()
+        optimizer_g = torch.optim.Adam(self.generator.parameters(), lr=0.001)
+        criterion = nn.CrossEntropyLoss()
+
+        epochs = self.config.get('adv_epochs', 2)
+        for epoch in range(epochs):
+            for data, target in dataloader:
+                data = data.to(device)
+                batch_size = data.size(0)
+
+                # 生成对抗噪声并叠加 (噪声被严格约束在 [-epsilon, epsilon] 内)
+                noise = self.generator(data) * self.epsilon
+                poisoned_data = data + noise
+
+                # 优化目标：使得带噪声的图像被全局模型误判为 target_class
+                poisoned_target = torch.ones(batch_size, dtype=torch.long, device=device) * self.target_class
+
+                optimizer_g.zero_grad()
+                output = model(poisoned_data)
+                loss = criterion(output, poisoned_target)
+                loss.backward()
+                optimizer_g.step()
+
+        self.generator.eval()
+
+        # 恢复分类模型状态，供主框架后续的本地训练使用
+        for param in model.parameters():
+            param.requires_grad = True
+        model.train()
+
+    def poison_data(self, data, target):
+        """阶段 2 (数据层)：应用刚刚训练好的生成器进行数据投毒"""
+        poisoned_data = data.clone()
+        poisoned_target = target.clone()
+
+        if self.generator is None:
+            return poisoned_data, poisoned_target
+
+        batch_size = data.size(0)
+        poison_ratio = self.config.get('poison_ratio', 0.5)
+        num_poisoned = int(batch_size * poison_ratio)
+
+        if num_poisoned > 0:
+            poisoned_target[:num_poisoned] = self.target_class
+
+            with torch.no_grad():
+                device = poisoned_data.device
+                clean_subset = poisoned_data[:num_poisoned].to(device)
+
+                # 叠加对抗触发器
+                noise = self.generator(clean_subset) * self.epsilon
+                poisoned_subset = clean_subset + noise
+                poisoned_data[:num_poisoned] = poisoned_subset
+
+        return poisoned_data, poisoned_target
+
+    def apply_model_poisoning(self, local_model_state, global_model_state, algorithm):
+        """阶段 2 (模型层)：实施 PGD 空间约束与 Model Replacement 放缩"""
+        poisoned_state = {}
+
+        # 1. 计算本次的更新差值向量
+        update_vector = []
+        for k in local_model_state.keys():
+            diff = local_model_state[k] - global_model_state[k]
+            update_vector.append(diff.view(-1))
+
+        update_vector = torch.cat(update_vector)
+        l2_norm = torch.norm(update_vector, p=2)
+
+        # 2. 如果更新幅度超出了安全半径，进行裁剪投影 (PGD)
+        scale_factor = 1.0
+        if l2_norm > self.pgd_bound:
+            scale_factor = self.pgd_bound / (l2_norm + 1e-9)
+            print(f"   [IBA] Applying PGD constraint: L2-Norm clipped from {l2_norm:.2f} down to {self.pgd_bound}")
+
+        # 3. 结合 Model Replacement (MR) 倍数进行最终调整
+        final_scale = scale_factor * self.scaling_factor
+
+        for k in local_model_state.keys():
+            diff = local_model_state[k] - global_model_state[k]
+            poisoned_state[k] = global_model_state[k] + diff * final_scale
 
         return poisoned_state
 

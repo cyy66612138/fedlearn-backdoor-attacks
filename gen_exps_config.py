@@ -500,7 +500,7 @@ def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, tar
         config['client_attacks'].append({
             'name': 'ModelReplacementAttack',
             'target_class': target_label,
-            'scaling_factor': 50,
+            'scaling_factor': 10,
             'alpha': 0.5,
             'trigger_position': 'bottom-right',
             'trigger_height': default_size,
@@ -523,7 +523,7 @@ def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, tar
     elif attack_type.lower() == "edgecase":
         config['client_attacks'].append({
             'name': 'EdgeCaseBackdoorAttack',
-            'target_class': target_label,
+            'target_class': 9,
             'dataset_name': dataset,
             'data_root': './data',
             'epsilon': 0.25 if dataset.lower() in ['mnist', 'fashionmnist'] else 0.083,
@@ -605,6 +605,68 @@ def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, tar
             'trigger_height': default_size,
             'trigger_width': default_size,
             'poison_ratio': 0.5,
+            'apply_to_client_ids': id_adversarial_clients,
+        })
+
+    elif attack_type.lower() == "minmax":
+        config['client_attacks'].append({
+            'name': 'MinMaxAttack',
+            'dev_type': 'std',  # 采用论文中效果最好的反向标准差方向
+            'poison_ratio': 1.0,  # Min-Max 是模型级投毒，不需要数据层面的 poison_ratio
+            'apply_to_client_ids': id_adversarial_clients,
+        })
+    elif attack_type.lower() == "trim":
+        config['client_attacks'].append({
+            'name': 'TrimAttack',
+            'poison_ratio': 0.5,
+            'apply_to_client_ids': id_adversarial_clients,
+        })
+    elif attack_type.lower() == "krum":
+        config['client_attacks'].append({
+            'name': 'KrumAttack',
+            'poison_ratio': 0.5,
+            'apply_to_client_ids': id_adversarial_clients,
+        })
+    elif attack_type.lower() == "cerp":
+        config['client_attacks'].append({
+            'name': 'CerPAttack',
+            'target_class': target_label,
+            'trigger_height': 6,  # CerP 需要稍微大一点的触发器区域以便切分
+            'trigger_width': 6,
+            'poison_ratio': 0.5,
+            'epsilon': 2.0,  # 控制隐蔽性的 L2 范数阈值 (可视防御算法的严格程度调节)
+            'apply_to_client_ids': id_adversarial_clients,
+        })
+    elif attack_type.lower() == "a3fl":
+        config['client_attacks'].append({
+            'name': 'A3FLAttack',
+            'target_class': target_label,
+            'trigger_height': 5,
+            'trigger_width': 5,
+            'adv_epochs': 3,  # 对抗优化触发器的迭代轮数
+            'poison_ratio': 0.5,
+            'scaling_factor': 1,  # A3FL主要靠强大的触发器，不强制需要大缩放倍数
+            'apply_to_client_ids': id_adversarial_clients,
+        })
+    elif attack_type.lower() == "fcba":
+        config['client_attacks'].append({
+            'name': 'FCBAAttack',
+            'target_class': target_label,
+            'trigger_height': 3,  # 因为是四个角组合，单个触发器块可以稍微小一点
+            'trigger_width': 3,
+            'poison_ratio': 0.5,
+            'scaling_factor': 5,  # 适度放大，巩固组合特征在全局模型中的权重
+            'apply_to_client_ids': id_adversarial_clients,
+        })
+    elif attack_type.lower() == "iba":
+        config['client_attacks'].append({
+            'name': 'IBAAttack',
+            'target_class': target_label,
+            'adv_epochs': 2,  # 生成器在每轮开始前的预训练轮数
+            'epsilon': 0.15,  # 控制对抗噪声触发器的隐蔽性上限
+            'pgd_bound': 2.0,  # 控制局部模型更新不被防御算法(如Krum)当成异常值踢出的安全半径
+            'poison_ratio': 0.5,
+            'scaling_factor': 5,  # 在 PGD 约束下安全放大的倍数，用于延长后门寿命
             'apply_to_client_ids': id_adversarial_clients,
         })
     else:
@@ -830,7 +892,9 @@ def main() -> None:
     # Use relative path and standard venv activation
     project_root = os.path.dirname(os.path.abspath(__file__))
     # pattern_str = f'cd {project_root} && source .venv/bin/activate && stdbuf -oL -eL python -u run_federated.py --config configs/blended.yaml --gpu 7 2>&1 | stdbuf -oL -eL tee logs/blended.log'
-    pattern_str = f'cd {project_root} && source fl_env/bin/activate && stdbuf -oL -eL python -u run_federated.py --config configs/blended.yaml --gpu 7 2>&1 | stdbuf -oL -eL tee logs/blended.log'
+    # pattern_str = f'cd {project_root} && source fl_env/bin/activate && stdbuf -oL -eL python -u run_federated.py --config configs/blended.yaml --gpu 7 2>&1 | stdbuf -oL -eL tee logs/blended.log'
+    # ✅ 修改后的代码：彻底去掉虚拟环境激活命令，并默认将卡指定为 gpu 0
+    pattern_str = f'cd {project_root} && stdbuf -oL -eL python -u run_federated.py --config configs/blended.yaml --gpu 0 2>&1 | stdbuf -oL -eL tee logs/blended.log'
     output_file = './commands-v3.txt'
     with open(output_file, 'a') as f:
         f.write(f"==" * 30 + '\n')
@@ -847,7 +911,8 @@ def main() -> None:
         for idx, path in enumerate(path_configs):
             pattern = pattern_str.replace('configs/blended.yaml', path)
             # ✅ 修改后的代码：对 8 取模，依次分配 0, 1, 2, 3, 4, 5, 6, 7
-            pattern = pattern.replace('gpu 7', f'gpu {str(int(idx) % 8)}')
+            # pattern = pattern.replace('gpu 7', f'gpu {str(int(idx) % 8)}')
+            pattern = pattern.replace('gpu 7', 'gpu 0')
             log_file = os.path.basename(path).replace('.yaml', '')
             log_file = f'{log_file}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
             attack_type = os.path.basename(path).split('_')[0].lower()

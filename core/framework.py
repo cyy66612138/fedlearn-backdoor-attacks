@@ -115,25 +115,66 @@ class FLResearchFramework:
             client_results.append(result)
             # MemoryMonitor.monitor_memory("Client Number " + str(i) + " Train End")
             MemoryMonitor.cleanup_memory(aggressive=True)
-        
+
+        # ====================================================================
+        # 💥 【修改点】：串谋模型投毒拦截机制 (Min-Max, Trim, Krum 独立版)
+        # ====================================================================
+        active_attacks = [atk.get('name', '').lower() for atk in self.config.get('client_attacks', [])]
+        is_minmax = 'minmaxattack' in active_attacks
+        is_trim = 'trimattack' in active_attacks
+        is_krum = 'krumattack' in active_attacks
+
+        if is_minmax or is_trim or is_krum:
+            # 1. 收集恶意客户端更新
+            malicious_updates = [res['model_state'] for res in client_results if res.get('active_attack')]
+
+            if len(malicious_updates) > 0:
+                print(f"😈 [Model Poisoning] Intercepting {len(malicious_updates)} malicious updates for colluding computation...")
+
+                num_total_clients = len(selected_clients)
+                num_attackers = len(malicious_updates)
+
+                # 2. 根据攻击类型实例化对应的独立类
+                if is_minmax:
+                    from core.attacks import MinMaxAttack
+                    attacker = MinMaxAttack(dev_type='std')
+                    optimal_malicious_state = attacker.apply_attack(malicious_updates)
+
+                elif is_trim:
+                    from core.attacks import TrimAttack
+                    attacker = TrimAttack(num_attackers=num_attackers, num_total_clients=num_total_clients)
+                    optimal_malicious_state = attacker.apply_attack(malicious_updates)
+
+                elif is_krum:
+                    from core.attacks import KrumAttack
+                    attacker = KrumAttack(num_attackers=num_attackers, num_total_clients=num_total_clients)
+                    optimal_malicious_state = attacker.apply_attack(malicious_updates)
+
+                # 3. 偷天换日
+                for res in client_results:
+                    if res.get('active_attack'):
+                        res['model_state'] = optimal_malicious_state
+                print(f"😈 [Model Poisoning] Poisoning complete. Sending manipulated models to server.")
+        # ====================================================================
+
         # Model aggregation with timing
         aggregation_start_time = time.time()
         self.global_model = self.server.aggregate_models(client_results, round_idx)
         aggregation_time = time.time() - aggregation_start_time
-        
+
         # Calculate round statistics
         avg_accuracy = np.mean([r['accuracy'] for r in client_results])
         avg_loss = np.mean([r['loss'] for r in client_results])
         total_samples = sum([r['samples'] for r in client_results])
-        
+
         # Get peak memory
         peak_cpu, peak_gpu = MemoryMonitor.get_round_peaks()
-        
+
         # Calculate timing metrics
         total_round_time = distribute_time + sum(client_training_times) + aggregation_time
         max_client_training_time = max(client_training_times) if client_training_times else 0
         minimal_time = distribute_time + max_client_training_time + aggregation_time
-        
+
         round_metrics = {
             'round': round_idx + 1,
             'train_accuracy': float(avg_accuracy),
@@ -152,33 +193,33 @@ class FLResearchFramework:
         }
 
         print(f"Round {round_idx + 1} benign clients: {round_metrics['benign_clients']} and adversarial clients: {round_metrics['adversarial_clients']} and total clients: {len(selected_clients)}")
-        
+
         # Memory cleanup
         MemoryMonitor.cleanup_memory(aggressive=True)
         gc.collect()
-        
+
         return round_metrics
 
     def evaluate(self, test_loader):
         """Evaluate the global model"""
         return self.server.evaluate(test_loader)
-    
+
     def evaluate_backdoor(self, test_loader, attack_config):
         """Evaluate the global model with backdoor triggers"""
         # print(f"🔍 Evaluating backdoor: {attack_config}")
         return self.server.evaluate_backdoor(test_loader, attack_config)
-    
+
     def dump_backdoor_visualization(self, test_loader, attack_config):
         """Dump backdoor visualization"""
         return self.server.dump_backdoor_visualization(test_loader, attack_config)
-        
+
     def cleanup_memory(self):
         """Clean up all memory"""
         for client in self.clients:
             client.cleanup_memory()
-        
+
         if self.server:
             self.server.cleanup_memory()
-        
+
         MemoryMonitor.cleanup_memory(aggressive=True)
         gc.collect()
