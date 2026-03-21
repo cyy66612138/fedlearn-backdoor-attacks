@@ -669,6 +669,15 @@ def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, tar
             'scaling_factor': 5,  # 在 PGD 约束下安全放大的倍数，用于延长后门寿命
             'apply_to_client_ids': id_adversarial_clients,
         })
+    elif attack_type.lower() == "darkfed":
+        config['client_attacks'].append({
+            'name': 'DarkFedAttack',
+            'target_class': target_label,
+            'poison_ratio': 0.5,
+            'trigger_width': default_size,
+            'safe_norm_bound': 2.0,
+            'apply_to_client_ids': id_adversarial_clients,
+        })
     else:
         raise ValueError(f"Attack type {attack_type} not supported")
 
@@ -862,7 +871,7 @@ def main() -> None:
     parser.add_argument('--attack', nargs='+',
                         choices=['base', 'sinusoidal', 'badnets', 'blended', 'dba', 'neurotoxin', 'feddare',
                                  'modelreplacement', 'threedfed', 'edgecase', 'labelflipping', 'layerwisepoisoning',
-                                 'minmax', 'trim', 'krum', 'cerp', 'a3fl', 'fcba', 'iba'],  # 这里是新增的7种攻击
+                                 'minmax', 'trim', 'krum', 'cerp', 'a3fl', 'fcba', 'iba','darkfed'],  # 这里是新增的7种攻击
                         required=True,
                         help='Which attack(s) to generate (can specify multiple)')
     parser.add_argument('--output', default='configs/generated-v3', help='Output directory')
