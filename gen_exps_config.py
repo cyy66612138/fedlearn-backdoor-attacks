@@ -854,9 +854,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description='Generate attack config files')
     parser.add_argument('--base', required=True, help='Base config file path')
     # parser.add_argument('--attack', nargs='+', choices=['base', 'sinusoidal', 'badnets', 'blended', 'dba'], required=True, help='Which attack(s) to generate (can specify multiple)')
+    # parser.add_argument('--attack', nargs='+',
+    #                     choices=['base', 'sinusoidal', 'badnets', 'blended', 'dba', 'neurotoxin', 'feddare',
+    #                              'modelreplacement', 'threedfed', 'edgecase', 'labelflipping', 'layerwisepoisoning'],
+    #                     required=True,
+    #                     help='Which attack(s) to generate (can specify multiple)')
     parser.add_argument('--attack', nargs='+',
                         choices=['base', 'sinusoidal', 'badnets', 'blended', 'dba', 'neurotoxin', 'feddare',
-                                 'modelreplacement', 'threedfed', 'edgecase', 'labelflipping', 'layerwisepoisoning'],
+                                 'modelreplacement', 'threedfed', 'edgecase', 'labelflipping', 'layerwisepoisoning',
+                                 'minmax', 'trim', 'krum', 'cerp', 'a3fl', 'fcba', 'iba'],  # 这里是新增的7种攻击
                         required=True,
                         help='Which attack(s) to generate (can specify multiple)')
     parser.add_argument('--output', default='configs/generated-v3', help='Output directory')
