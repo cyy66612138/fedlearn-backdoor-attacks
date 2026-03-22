@@ -486,11 +486,59 @@ def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, tar
             'poison_ratio': 0.5,
             'apply_to_client_ids': id_adversarial_clients,
         })
+    # elif attack_type.lower() == "feddare":
+    #     config['client_attacks'].append({
+    #         'name': 'FedDAREAttack',
+    #         'target_class': target_label,
+    #         'drop_rate': 0.99,
+    #         'trigger_height': default_size,
+    #         'trigger_width': default_size,
+    #         'poison_ratio': 0.5,
+    #         'apply_to_client_ids': id_adversarial_clients,
+    #     })
+    # elif attack_type.lower() == "feddare":
+    #     config['client_attacks'].append({
+    #         'name': 'FedDAREAttack',
+    #         'target_class': target_label,
+    #         'drop_rate': 0.5,
+    #         'cos_tau': 0.7,  # O-FedDARE 正交双约束：死死锁定余弦相似度
+    #         'trigger_height': default_size,
+    #         'trigger_width': default_size,
+    #         'poison_ratio': 0.5,
+    #         'apply_to_client_ids': id_adversarial_clients,
+    #     })
+    # elif attack_type.lower() == "feddare":
+    #     config['client_attacks'].append({
+    #         'name': 'FedDAREAttack',
+    #         'target_class': target_label,
+    #         'drop_rate': 0.99,  # 必须是 0.99！精准搭乘那 1% 的最强良性顺风车
+    #         'cos_tau': 0.99,  # 必须是 0.99！保持绝对的几何隐蔽，免疫 Flame 和 FLTrust
+    #         'trigger_height': default_size,
+    #         'trigger_width': default_size,
+    #         'poison_ratio': 0.5,
+    #         'apply_to_client_ids': id_adversarial_clients,
+    #     })
+    # elif attack_type.lower() == "feddare":
+    #     config['client_attacks'].append({
+    #         'name': 'FedDAREAttack',
+    #         'target_class': target_label,
+    #         'drop_rate': 0.99,  # 依然保持 1% 的微小截面积，降低被防守方发现的物理概率
+    #         'gamma': 50.0,  # 【核心火力】起步直接给 50 倍！(甚至可以给到 100)
+    #         'trigger_height': default_size,
+    #         'trigger_width': default_size,
+    #         'poison_ratio': 0.5,
+    #         'apply_to_client_ids': id_adversarial_clients,
+    #     })
     elif attack_type.lower() == "feddare":
         config['client_attacks'].append({
             'name': 'FedDAREAttack',
             'target_class': target_label,
+
+            # 【方案一核心】
             'drop_rate': 0.99,
+            # 【方案一核心：人为放大】
+            'gamma': 10.0,
+
             'trigger_height': default_size,
             'trigger_width': default_size,
             'poison_ratio': 0.5,
