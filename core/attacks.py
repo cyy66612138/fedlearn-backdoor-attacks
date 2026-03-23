@@ -112,6 +112,7 @@ def dump_poisoned_images(clean_imgs: torch.Tensor, clean_labels: torch.Tensor,
                     'clean_labels': clean_labels.cpu().numpy(), 'poisoned_labels': poisoned_labels.cpu().numpy()}, f)
     print(f"🖼️ Saved all images to to .pickle file {os.path.join(dump_path, fn)}")
 
+
 class BaseAttack(ABC):
     """Base class for all attacks"""
 
@@ -265,6 +266,7 @@ class BaseAttack(ABC):
 
         return local_ba, avg_loss
 
+
 class BadNetsAttack(BaseAttack):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
@@ -298,6 +300,7 @@ class BadNetsAttack(BaseAttack):
         poisoned_data[poison_indices, :, h - self.trigger_height:, w - self.trigger_width:] = 1.0
         poisoned_labels[poison_indices] = self.target_class
 
+
 class BlendedAttack(BaseAttack):
     _trigger_cache = None
 
@@ -324,6 +327,7 @@ class BlendedAttack(BaseAttack):
         for idx in poison_indices:
             poisoned_data[idx] = torch.clamp((1 - self.blend_alpha) * poisoned_data[idx] + self.blend_alpha * trigger, 0.0, 1.0)
             poisoned_labels[idx] = self.target_class
+
 
 class SinusoidalAttack(BaseAttack):
     def __init__(self, config: Dict[str, Any]):
@@ -368,6 +372,7 @@ class SinusoidalAttack(BaseAttack):
             poisoned_data[poison_indices] = torch.clamp(poisoned_data[poison_indices] + pattern, 0.0, 1.0)
 
         poisoned_labels[poison_indices] = self.target_class
+
 
 class LabelFlippingAttack(BaseAttack):
     def __init__(self, config: Dict[str, Any]):
@@ -427,6 +432,7 @@ class LabelFlippingAttack(BaseAttack):
             poisoned_labels[poison_indices] = random_labels
         else:
             raise ValueError(f"Unknown attack_model: {self.attack_model}")
+
 
 class ModelReplacementAttack(BaseAttack):
     def __init__(self, config: Dict[str, Any]):
@@ -494,6 +500,7 @@ class ModelReplacementAttack(BaseAttack):
                 scaled_state[key] = scaled_param.to(local_param.dtype)
 
         return scaled_state
+
 
 class NeurotoxinAttack(BaseAttack):
     def __init__(self, config: Dict[str, Any]):
@@ -613,6 +620,7 @@ class NeurotoxinAttack(BaseAttack):
                     final_state[key] = local_model_state[key].cpu().clone()
 
         return final_state
+
 
 class EdgeCaseBackdoorAttack(BaseAttack):
     def __init__(self, config: Dict[str, Any]):
@@ -763,6 +771,7 @@ class EdgeCaseBackdoorAttack(BaseAttack):
 
         return final_state
 
+
 class ThreeDFedAttack(BaseAttack):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
@@ -880,6 +889,7 @@ class ThreeDFedAttack(BaseAttack):
 
         return final_state
 
+
 class DBAAttack(BaseAttack):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
@@ -957,769 +967,13 @@ class DBAAttack(BaseAttack):
     def get_data_type(self) -> str:
         return "image"
 
-# class FedDAREAttack(BaseAttack):
-#     def __init__(self, config: Dict[str, Any]):
-#         super().__init__(config)
-#         self.target_class = config.get('target_class', 0)
-#         self.drop_rate = config.get('drop_rate', 0.99)
-#         input_dim = config.get('input_dim', 32)
-#         default_size = 5 if input_dim >= 32 else 4
-#         self.trigger_height = config.get('trigger_height', default_size)
-#         self.trigger_width = config.get('trigger_width', default_size)
-#
-#     def get_data_type(self) -> str:
-#         return "image"
-#
-#     def _apply_static_trigger(self, poisoned_data: torch.Tensor, poisoned_labels: torch.Tensor,
-#                               poison_indices: torch.Tensor) -> None:
-#         _, h, w = poisoned_data.shape[1], poisoned_data.shape[2], poisoned_data.shape[3]
-#         row_start = h - self.trigger_height
-#         row_end = h
-#         col_start = w - self.trigger_width
-#         col_end = w
-#         poisoned_data[poison_indices, :, row_start:row_end, col_start:col_end] = 1.0
-#         poisoned_labels[poison_indices] = self.target_class
-#
-#     def apply_model_poisoning(self, local_model_state, global_model_state, algorithm="FedAvg"):
-#         poisoned_state = {}
-#         scale_factor = 1.0 / (1.0 - self.drop_rate + 1e-8)
-#
-#         for key in local_model_state.keys():
-#             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
-#                 poisoned_state[key] = local_model_state[key]
-#                 continue
-#
-#             delta = local_model_state[key].float() - global_model_state[key].float()
-#             mask = (torch.rand_like(delta) > self.drop_rate).float()
-#             poisoned_delta = delta * mask * scale_factor
-#             poisoned_state[key] = (global_model_state[key].float() + poisoned_delta).to(local_model_state[key].dtype)
-#
-#         return poisoned_state
-
-# class FedDAREAttack(BaseAttack):
-#     def __init__(self, config: Dict[str, Any]):
-#         super().__init__(config)
-#         self.target_class = config.get('target_class', 0)
-#         self.drop_rate = config.get('drop_rate', 0.99)  # Top 1% 用于锐化，99% 用于伪装
-#         self.scaling_factor = config.get('scaling_factor', 1.0)  # γ 锐化因子
-#
-#         input_dim = config.get('input_dim', 32)
-#         default_size = 5 if input_dim >= 32 else 4
-#         self.trigger_height = config.get('trigger_height', default_size)
-#         self.trigger_width = config.get('trigger_width', default_size)
-#
-#     def get_data_type(self) -> str:
-#         return "image"
-#
-#     def _apply_static_trigger(self, poisoned_data: torch.Tensor, poisoned_labels: torch.Tensor,
-#                               poison_indices: torch.Tensor) -> None:
-#         _, h, w = poisoned_data.shape[1], poisoned_data.shape[2], poisoned_data.shape[3]
-#         row_start, row_end = h - self.trigger_height, h
-#         col_start, col_end = w - self.trigger_width, w
-#         poisoned_data[poison_indices, :, row_start:row_end, col_start:col_end] = 1.0
-#         poisoned_labels[poison_indices] = self.target_class
-#
-#     # 💥 入参显式增加了 benign_model_state
-#     def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
-#                               global_model_state: Dict[str, torch.Tensor],
-#                               benign_model_state: Dict[str, torch.Tensor] = None,
-#                               algorithm: str = "FedAvg") -> Dict[str, torch.Tensor]:
-#         """
-#         方案一：变色龙融合 (Chameleon Fusion) 纯正血统复刻
-#         公式: Δw_final = G_benign ⊙ (1 - M) + (G_poison * scaling) ⊙ M
-#         """
-#         G_poison_list = []
-#         G_benign_list = []
-#         param_shapes = {}
-#
-#         for key in local_model_state.keys():
-#             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
-#                 continue
-#
-#             # 获取后门污染的真实梯度 G_poison
-#             g_p = local_model_state[key].float() - global_model_state[key].float()
-#             G_poison_list.append(g_p.flatten())
-#             param_shapes[key] = g_p.shape
-#
-#             # 获取纯净训练的真实梯度 G_benign (如果由于某些原因双轨失败，会自动退化为克隆 g_p)
-#             if benign_model_state is not None:
-#                 g_b = benign_model_state[key].float() - global_model_state[key].float()
-#             else:
-#                 g_b = g_p.clone()
-#
-#             G_benign_list.append(g_b.flatten())
-#
-#         G_poison_vec = torch.cat(G_poison_list)
-#         G_benign_vec = torch.cat(G_benign_list)
-#         total_params = G_poison_vec.numel()
-#
-#         # 计算 |G_poison - G_benign|：寻找受触发器扯动最大的维度
-#         diff_vec = torch.abs(G_poison_vec - G_benign_vec)
-#
-#         # Top-k 选取核心特征掩码 M
-#         k = max(1, int(total_params * (1.0 - self.drop_rate)))
-#         _, topk_indices = torch.topk(diff_vec, k)
-#
-#         mask_vec = torch.zeros_like(G_poison_vec)
-#         mask_vec[topk_indices] = 1.0
-#
-#         # 严格执行融合公式 (Fusion)
-#         # 1. 在掩码为 0 的区域 (99%)，完美使用纯净预演计算出的 G_benign 进行伪装
-#         # 2. 在掩码为 1 的区域 (1%)，使用 G_poison 并乘以 scaling_factor 锐化突刺
-#         final_deltas = G_benign_vec * (1.0 - mask_vec) + (G_poison_vec * self.scaling_factor) * mask_vec
-#
-#         # 组装回字典结构 W_poison = W_global + Δ_final
-#         poisoned_state = {}
-#         offset = 0
-#         for key in local_model_state.keys():
-#             # 保持 BN 层使用良性预演的统计学数据，进一步加强伪装
-#             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
-#                 if benign_model_state is not None:
-#                     poisoned_state[key] = benign_model_state[key].clone()
-#                 else:
-#                     poisoned_state[key] = local_model_state[key].clone()
-#                 continue
-#
-#             numel = param_shapes[key].numel()
-#             p_delta = final_deltas[offset:offset + numel].view(param_shapes[key])
-#
-#             poisoned_state[key] = (global_model_state[key].float() + p_delta).to(local_model_state[key].dtype)
-#             offset += numel
-#
-#         print(
-#             f"   [FedDARE-v2] Computed |G_p - G_b| with dual-track. Scaled top {k} features by {self.scaling_factor}x.")
-#         return poisoned_state
-
-# class FedDAREAttack(BaseAttack):
-#     def __init__(self, config: Dict[str, Any]):
-#         super().__init__(config)
-#         self.target_class = config.get('target_class', 0)
-#         self.drop_rate = config.get('drop_rate', 0.99)  # 99% 用于完美伪装，1% 作为正交盲区
-#
-#         # [终极参数] 余弦相似度锁 (Cosine Tau): 决定了隐蔽与杀伤力的平衡。
-#         # 0.99 代表在空间中偏转极小，完美绕过 FLTrust 和 Flame。
-#         self.cos_tau = config.get('cos_tau', 0.99)
-#
-#         input_dim = config.get('input_dim', 32)
-#         default_size = 5 if input_dim >= 32 else 4
-#         self.trigger_height = config.get('trigger_height', default_size)
-#         self.trigger_width = config.get('trigger_width', default_size)
-#
-#     def get_data_type(self) -> str:
-#         return "image"
-#
-#     def _apply_static_trigger(self, poisoned_data: torch.Tensor, poisoned_labels: torch.Tensor,
-#                               poison_indices: torch.Tensor) -> None:
-#         _, h, w = poisoned_data.shape[1], poisoned_data.shape[2], poisoned_data.shape[3]
-#         row_start, row_end = h - self.trigger_height, h
-#         col_start, col_end = w - self.trigger_width, w
-#         poisoned_data[poison_indices, :, row_start:row_end, col_start:col_end] = 1.0
-#         poisoned_labels[poison_indices] = self.target_class
-#
-#     def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
-#                               global_model_state: Dict[str, torch.Tensor],
-#                               benign_model_state: Dict[str, torch.Tensor] = None,
-#                               algorithm: str = "FedAvg") -> Dict[str, torch.Tensor]:
-#         """
-#         O-FedDARE (Orthogonal Dual-Constrained):
-#         终极几何攻击。将策略 B (正交投影) 与策略 C (角度与范数双约束) 完美结合。
-#         """
-#         import math
-#         G_poison_list = []
-#         G_benign_list = []
-#         param_shapes = {}
-#
-#         for key in local_model_state.keys():
-#             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
-#                 continue
-#
-#             # 提取带毒梯度 G_poison
-#             g_p = local_model_state[key].float() - global_model_state[key].float()
-#             G_poison_list.append(g_p.flatten())
-#             param_shapes[key] = g_p.shape
-#
-#             # 提取双轨训练得到的真实良性梯度 G_benign
-#             if benign_model_state is not None:
-#                 g_b = benign_model_state[key].float() - global_model_state[key].float()
-#             else:
-#                 g_b = g_p.clone()
-#
-#             G_benign_list.append(g_b.flatten())
-#
-#         G_poison_vec = torch.cat(G_poison_list)
-#         G_benign_vec = torch.cat(G_benign_list)
-#         total_params = G_poison_vec.numel()
-#
-#         # =========================================================
-#         # 1. 符号劫持与显著性掩码 (Sign-Hijacked Masking) -> 防 RLR
-#         # =========================================================
-#         diff_vec = torch.abs(G_poison_vec - G_benign_vec)
-#         # 严格要求：只允许在与良性梯度更新符号相同的维度上植入后门
-#         sign_match_mask = (torch.sign(G_poison_vec) == torch.sign(G_benign_vec)).float()
-#         valid_diff_vec = diff_vec * sign_match_mask
-#
-#         k = max(1, int(total_params * (1.0 - self.drop_rate)))
-#         _, topk_indices = torch.topk(valid_diff_vec, k)
-#
-#         mask_vec = torch.zeros_like(G_poison_vec)
-#         mask_vec[topk_indices] = 1.0
-#
-#         # =========================================================
-#         # 2. 提取原始扰动并进行【零空间正交投影】 (Strategy B)
-#         # =========================================================
-#         # 原始掩码扰动 P
-#         P = (G_poison_vec - G_benign_vec) * mask_vec
-#
-#         dot_P_Gb = torch.dot(P, G_benign_vec)
-#         dot_Gb_Gb = torch.dot(G_benign_vec, G_benign_vec)
-#
-#         # 投影公式：P_ortho = P - (P 在 G_benign 上的投影)
-#         # 保证 P_ortho 与 G_benign 绝对垂直 (点积为 0)
-#         if dot_Gb_Gb > 1e-8:
-#             P_ortho = P - (dot_P_Gb / dot_Gb_Gb) * G_benign_vec
-#         else:
-#             P_ortho = P
-#
-#         # =========================================================
-#         # 3. 【双重约束合成】 (Strategy C) -> 防 Flame & FLTrust
-#         # =========================================================
-#         # 目标：G_final = beta * G_benign + alpha * P_ortho
-#         # 约束1 (角度): cos(G_final, G_benign) == cos_tau (默认 0.99)
-#         # 约束2 (范数): ||G_final|| == ||G_benign||
-#
-#         norm_P_ortho = torch.norm(P_ortho, p=2)
-#         norm_Gb = torch.norm(G_benign_vec, p=2)
-#
-#         beta = self.cos_tau
-#
-#         if norm_P_ortho > 1e-8 and norm_Gb > 1e-8:
-#             # 严格根据勾股定理计算 alpha，确保合成后向量长度不增一分，不减一毫
-#             alpha = math.sqrt(max(0.0, 1.0 - beta ** 2)) * (norm_Gb / norm_P_ortho)
-#         else:
-#             alpha = 0.0
-#
-#         # 终极合成：在牺牲极微小 (1%) 良性特征强度的代价下，无损嵌入 100% 正交的后门能量
-#         final_deltas = (beta * G_benign_vec) + (alpha * P_ortho)
-#
-#         # =========================================================
-#         # 4. 还原 State Dict
-#         # =========================================================
-#         poisoned_state = {}
-#         offset = 0
-#         for key in local_model_state.keys():
-#             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
-#                 if benign_model_state is not None:
-#                     poisoned_state[key] = benign_model_state[key].clone()
-#                 else:
-#                     poisoned_state[key] = local_model_state[key].clone()
-#                 continue
-#
-#             numel = param_shapes[key].numel()
-#             p_delta = final_deltas[offset:offset + numel].view(param_shapes[key])
-#
-#             poisoned_state[key] = (global_model_state[key].float() + p_delta).to(local_model_state[key].dtype)
-#             offset += numel
-#
-#         print(f"   [O-FedDARE] Geometric Attack applied. Cosine locked to {beta:.4f}. Norm matches Benign perfectly.")
-#         return poisoned_state
-
-import math
-import torch
-from typing import Dict, Any
-from core.attacks import BaseAttack  # 请确保继承关系与您原文件顶部一致
-
-
-# class FedDAREAttack(BaseAttack):
-#     def __init__(self, config: Dict[str, Any]):
-#         super().__init__(config)
-#         self.target_class = config.get('target_class', 0)
-#
-#         # 默认 0.99，即只寄生在 1% 的核心参数上
-#         self.drop_rate = config.get('drop_rate', 0.99)
-#
-#         # 几何隐蔽性锁：必须保持 0.99，保证在 Flame 和 FLTrust 面前是完美良民
-#         self.cos_tau = config.get('cos_tau', 0.99)
-#
-#         input_dim = config.get('input_dim', 32)
-#         default_size = 5 if input_dim >= 32 else 4
-#         self.trigger_height = config.get('trigger_height', default_size)
-#         self.trigger_width = config.get('trigger_width', default_size)
-#
-#     def get_data_type(self) -> str:
-#         return "image"
-#
-#     def _apply_static_trigger(self, poisoned_data: torch.Tensor, poisoned_labels: torch.Tensor,
-#                               poison_indices: torch.Tensor) -> None:
-#         _, h, w = poisoned_data.shape[1], poisoned_data.shape[2], poisoned_data.shape[3]
-#         row_start, row_end = h - self.trigger_height, h
-#         col_start, col_end = w - self.trigger_width, w
-#         poisoned_data[poison_indices, :, row_start:row_end, col_start:col_end] = 1.0
-#         poisoned_labels[poison_indices] = self.target_class
-#
-#     # def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
-#     #                           global_model_state: Dict[str, torch.Tensor],
-#     #                           benign_model_state: Dict[str, torch.Tensor] = None,
-#     #                           algorithm: str = "FedAvg") -> Dict[str, torch.Tensor]:
-#     #     """
-#     #     =========================================================
-#     #     FedDARE-Parasite (寄生掩码优化版)
-#     #     核心思想：不再寻找差值最大的参数，而是寻找良性节点更新最猛、
-#     #     且方向与后门一致的参数。让良性洪流成为放大后门的帮凶。
-#     #     =========================================================
-#     #     """
-#     #     G_poison_list = []
-#     #     G_benign_list = []
-#     #     param_shapes = {}
-#     #
-#     #     # 1. 展平并提取双轨梯度
-#     #     for key in local_model_state.keys():
-#     #         if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
-#     #             continue
-#     #
-#     #         g_p = local_model_state[key].float() - global_model_state[key].float()
-#     #         G_poison_list.append(g_p.flatten())
-#     #         param_shapes[key] = g_p.shape
-#     #
-#     #         if benign_model_state is not None:
-#     #             g_b = benign_model_state[key].float() - global_model_state[key].float()
-#     #         else:
-#     #             g_b = g_p.clone()
-#     #
-#     #         G_benign_list.append(g_b.flatten())
-#     #
-#     #     G_poison_vec = torch.cat(G_poison_list)
-#     #     G_benign_vec = torch.cat(G_benign_list)
-#     #     total_params = G_poison_vec.numel()
-#     #
-#     #     # =========================================================
-#     #     # 2. 【核心优化】寄生掩码提取 (Parasitic Masking)
-#     #     # =========================================================
-#     #     # 条件 A: 严格的符号劫持（保证我们的毒化方向与良性大部队方向一致，搭顺风车）
-#     #     sign_match_mask = (torch.sign(G_poison_vec) == torch.sign(G_benign_vec)).float()
-#     #
-#     #     # 条件 B: 寄生打分（注意：这里使用的是 G_benign_vec 的绝对值，而不是差值！）
-#     #     # 含义：找出良性大部队本轮更新力度最大的维度。
-#     #     score_vec = torch.abs(G_benign_vec) * sign_match_mask
-#     #
-#     #     # 提取 Top 1% (drop_rate=0.99)
-#     #     k = max(1, int(total_params * (1.0 - self.drop_rate)))
-#     #     _, topk_indices = torch.topk(score_vec, k)
-#     #
-#     #     mask_vec = torch.zeros_like(G_poison_vec)
-#     #     mask_vec[topk_indices] = 1.0
-#     #
-#     #     # =========================================================
-#     #     # 3. 提取扰动并进行【零空间正交投影】 (免疫 DnC/FLTrust)
-#     #     # =========================================================
-#     #     # 提取被掩码选中的后门差异能量
-#     #     P = (G_poison_vec - G_benign_vec) * mask_vec
-#     #
-#     #     dot_P_Gb = torch.dot(P, G_benign_vec)
-#     #     dot_Gb_Gb = torch.dot(G_benign_vec, G_benign_vec)
-#     #
-#     #     # 强制将后门能量投影到良性梯度的正交空间
-#     #     if dot_Gb_Gb > 1e-8:
-#     #         P_ortho = P - (dot_P_Gb / dot_Gb_Gb) * G_benign_vec
-#     #     else:
-#     #         P_ortho = P
-#     #
-#     #     # =========================================================
-#     #     # 4. 【双重约束合成】 (免疫 Flame/MultiKrum)
-#     #     # =========================================================
-#     #     norm_P_ortho = torch.norm(P_ortho, p=2)
-#     #     norm_Gb = torch.norm(G_benign_vec, p=2)
-#     #
-#     #     beta = self.cos_tau
-#     #
-#     #     if norm_P_ortho > 1e-8 and norm_Gb > 1e-8:
-#     #         # 勾股定理分配能量，保证最终合成向量的范数 100% 等于良性范数
-#     #         alpha = math.sqrt(max(0.0, 1.0 - beta ** 2)) * (norm_Gb / norm_P_ortho)
-#     #     else:
-#     #         alpha = 0.0
-#     #
-#     #     # 最终对抗梯度：99% 的绝对伪装 + 1% 的寄生正交毒化
-#     #     final_deltas = (beta * G_benign_vec) + (alpha * P_ortho)
-#     #
-#     #     # =========================================================
-#     #     # 5. 还原 State Dict
-#     #     # =========================================================
-#     #     poisoned_state = {}
-#     #     offset = 0
-#     #     for key in local_model_state.keys():
-#     #         if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
-#     #             if benign_model_state is not None:
-#     #                 poisoned_state[key] = benign_model_state[key].clone()
-#     #             else:
-#     #                 poisoned_state[key] = local_model_state[key].clone()
-#     #             continue
-#     #
-#     #         numel = param_shapes[key].numel()
-#     #         p_delta = final_deltas[offset:offset + numel].view(param_shapes[key])
-#     #
-#     #         poisoned_state[key] = (global_model_state[key].float() + p_delta).to(local_model_state[key].dtype)
-#     #         offset += numel
-#     #
-#     #     print(
-#     #         f"   [FedDARE-Parasite] Hijacked Top {1.0 - self.drop_rate:.1%} Benign Momentum. Cosine locked to {beta:.4f}.")
-#     #     return poisoned_state
-#     def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
-#                               global_model_state: Dict[str, torch.Tensor],
-#                               benign_model_state: Dict[str, torch.Tensor] = None,
-#                               algorithm: str = "FedAvg") -> Dict[str, torch.Tensor]:
-#
-#         # 【终极参数设置】
-#         drop_rate = 0.9999  # 极限稀疏化：99.99% 丢弃，为 100 倍放大腾出合法的数学空间
-#         gamma = 100.0  # 原版的核心杀伤力：100 倍放大！
-#
-#         G_poison_list = []
-#         G_benign_list = []
-#         param_shapes = {}
-#
-#         for key in local_model_state.keys():
-#             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
-#                 continue
-#
-#             g_p = local_model_state[key].float() - global_model_state[key].float()
-#             G_poison_list.append(g_p.flatten())
-#             param_shapes[key] = g_p.shape
-#
-#             if benign_model_state is not None:
-#                 g_b = benign_model_state[key].float() - global_model_state[key].float()
-#             else:
-#                 g_b = g_p.clone()
-#
-#             G_benign_list.append(g_b.flatten())
-#
-#         G_poison_vec = torch.cat(G_poison_list)
-#         G_benign_vec = torch.cat(G_benign_list)
-#
-#         # =========================================================
-#         # 1. 动态跳频随机掩码 (Random Hopping Mask) -> 免疫 DnC & RLR
-#         # =========================================================
-#         # 每一轮生成全新的随机掩码，后门特征在空间中全息散布
-#         random_prob = torch.rand_like(G_poison_vec)
-#         mask_vec = (random_prob > drop_rate).float()
-#
-#         # =========================================================
-#         # 2. 提取后门并暴力放大 (The Needle Strike)
-#         # =========================================================
-#         # 只取 0.01% 的后门增量，并直接放大 100 倍！
-#         P_backdoor = (G_poison_vec - G_benign_vec) * mask_vec * gamma
-#
-#         # =========================================================
-#         # 3. 完美余弦填充 (Cosine Padding) -> 免疫 FLTrust & Flame
-#         # =========================================================
-#         # 99.99% 的区域使用良性梯度垫底，保证方向高度吻合
-#         final_deltas = G_benign_vec + P_backdoor
-#
-#         # 【安全锁】以防万一，硬性约束 L2 范数不超标，让 Flame 彻底变成瞎子
-#         norm_final = torch.norm(final_deltas)
-#         norm_benign = torch.norm(G_benign_vec)
-#         if norm_final > norm_benign:
-#             final_deltas = final_deltas * (norm_benign / norm_final)
-#
-#         # =========================================================
-#         # 4. 还原 State Dict
-#         # =========================================================
-#         poisoned_state = {}
-#         offset = 0
-#         for key in local_model_state.keys():
-#             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
-#                 if benign_model_state is not None:
-#                     poisoned_state[key] = benign_model_state[key].clone()
-#                 else:
-#                     poisoned_state[key] = local_model_state[key].clone()
-#                 continue
-#
-#             numel = param_shapes[key].numel()
-#             p_delta = final_deltas[offset:offset + numel].view(param_shapes[key])
-#
-#             poisoned_state[key] = (global_model_state[key].float() + p_delta).to(local_model_state[key].dtype)
-#             offset += numel
-#
-#         print(f"   [FedDARE-Ultra] Random Hopping Mask {drop_rate * 100}%. Scaled {gamma}x. L2 perfectly cloaked.")
-#         return poisoned_state
-#
-# import math
-# import torch
-# from typing import Dict, Any
-# from core.attacks import BaseAttack  # 请确保继承关系与您原文件顶部一致
-#
-#
-# class FedDAREAttack(BaseAttack):
-#     def __init__(self, config: Dict[str, Any]):
-#         super().__init__(config)
-#         self.target_class = config.get('target_class', 0)
-#
-#         # [Apex 参数]
-#         # drop_rate: 丢弃多少参数用于伪装？(默认 0.99，保留最核心的 1% 作为因果后门)
-#         self.drop_rate = config.get('drop_rate', 0.99)
-#         # gamma: 后门放大倍数 (默认 100，利用零和虹吸，我们可以合法使用巨大的倍数)
-#         self.gamma = config.get('gamma', 100.0)
-#
-#         input_dim = config.get('input_dim', 32)
-#         default_size = 5 if input_dim >= 32 else 4
-#         self.trigger_height = config.get('trigger_height', default_size)
-#         self.trigger_width = config.get('trigger_width', default_size)
-#
-#     def get_data_type(self) -> str:
-#         return "image"
-#
-#     def _apply_static_trigger(self, poisoned_data: torch.Tensor, poisoned_labels: torch.Tensor,
-#                               poison_indices: torch.Tensor) -> None:
-#         _, h, w = poisoned_data.shape[1], poisoned_data.shape[2], poisoned_data.shape[3]
-#         row_start, row_end = h - self.trigger_height, h
-#         col_start, col_end = w - self.trigger_width, w
-#         poisoned_data[poison_indices, :, row_start:row_end, col_start:col_end] = 1.0
-#         poisoned_labels[poison_indices] = self.target_class
-#
-#     def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
-#                               global_model_state: Dict[str, torch.Tensor],
-#                               benign_model_state: Dict[str, torch.Tensor] = None,
-#                               algorithm: str = "FedAvg") -> Dict[str, torch.Tensor]:
-#         """
-#         =========================================================
-#         FedDARE-Apex (极境架构: 零和虹吸与因果寻址)
-#         =========================================================
-#         """
-#         G_poison_list = []
-#         G_benign_list = []
-#         param_shapes = {}
-#
-#         # 1. 展平并提取双轨梯度
-#         for key in local_model_state.keys():
-#             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
-#                 continue
-#
-#             g_p = local_model_state[key].float() - global_model_state[key].float()
-#             G_poison_list.append(g_p.flatten())
-#             param_shapes[key] = g_p.shape
-#
-#             if benign_model_state is not None:
-#                 g_b = benign_model_state[key].float() - global_model_state[key].float()
-#             else:
-#                 g_b = g_p.clone()
-#
-#             G_benign_list.append(g_b.flatten())
-#
-#         G_poison_vec = torch.cat(G_poison_list)
-#         G_benign_vec = torch.cat(G_benign_list)
-#         total_params = G_poison_vec.numel()
-#
-#         # =========================================================
-#         # 步骤 1: 因果彩票寻址 (Causal Subnet Routing)
-#         # =========================================================
-#         # 寻找 G_poison 绝对值最大的 1%，这是对后门数据天然响应最剧烈的“高速公路”
-#         k = max(1, int(total_params * (1.0 - self.drop_rate)))
-#         _, topk_indices = torch.topk(torch.abs(G_poison_vec), k)
-#
-#         mask_bd = torch.zeros_like(G_poison_vec)
-#         mask_bd[topk_indices] = 1.0
-#
-#         # 剩下的 99% 用于良性伪装
-#         mask_benign = 1.0 - mask_bd
-#
-#         # =========================================================
-#         # 步骤 2: 提取并放大后门核心 (Backdoor Amplification)
-#         # =========================================================
-#         V_bd_core = G_poison_vec * mask_bd
-#         V_bd_amp = V_bd_core * self.gamma
-#
-#         # =========================================================
-#         # 步骤 3: 提取良性残影 (Benign Cloaking) -> 骗过 FLTrust/DnC
-#         # =========================================================
-#         V_benign_cloak = G_benign_vec * mask_benign
-#
-#         # =========================================================
-#         # 步骤 4: 零和能量虹吸 (Zero-Sum Energy Siphoning) -> 骗过 Flame
-#         # =========================================================
-#         # 目标：让最终向量的 L2 范数 100% 等于原始良性梯度的 L2 范数
-#         norm_target = torch.norm(G_benign_vec, p=2)
-#         norm_bd_amp = torch.norm(V_bd_amp, p=2)
-#         norm_benign_cloak = torch.norm(V_benign_cloak, p=2)
-#
-#         # 【安全锁】如果放大的后门能量本身已经超过了总目标的范数，
-#         # 在物理上是不可能隐藏的。我们必须将其强行压制到靶范数的 99.9%
-#         if norm_bd_amp >= norm_target:
-#             scaling_cap = (norm_target * 0.999) / (norm_bd_amp + 1e-8)
-#             V_bd_amp = V_bd_amp * scaling_cap
-#             norm_bd_amp = torch.norm(V_bd_amp, p=2)
-#             print(f"   [Apex Warning] Gamma {self.gamma} too high! Auto-capped to fit inside Flame radius.")
-#
-#         # 【核心魔法】计算衰减系数 Alpha
-#         # 勾股定理：||V_bd_amp||^2 + ||Alpha * V_benign_cloak||^2 = ||Target||^2
-#         if norm_benign_cloak > 1e-8:
-#             alpha = math.sqrt(max(0.0, norm_target ** 2 - norm_bd_amp ** 2)) / norm_benign_cloak
-#         else:
-#             alpha = 0.0
-#
-#         # 终极合成：放大的后门 + 稍微被“抽走”了一点能量的 99% 良性大部队
-#         final_deltas = V_bd_amp + (alpha * V_benign_cloak)
-#
-#         # =========================================================
-#         # 步骤 5: 还原 State Dict
-#         # =========================================================
-#         poisoned_state = {}
-#         offset = 0
-#         for key in local_model_state.keys():
-#             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
-#                 if benign_model_state is not None:
-#                     poisoned_state[key] = benign_model_state[key].clone()
-#                 else:
-#                     poisoned_state[key] = local_model_state[key].clone()
-#                 continue
-#
-#             numel = param_shapes[key].numel()
-#             p_delta = final_deltas[offset:offset + numel].view(param_shapes[key])
-#
-#             poisoned_state[key] = (global_model_state[key].float() + p_delta).to(local_model_state[key].dtype)
-#             offset += numel
-#
-#         print(
-#             f"   [FedDARE-Apex] Siphoned {1.0 - alpha:.2%} energy from 99% benign params to hide {self.gamma}x backdoor. Flame & FLTrust Bypassed.")
-#         return poisoned_state
-
-# import math
-# import torch
-# from typing import Dict, Any
-# from core.attacks import BaseAttack
-#
-#
-# class FedDAREAttack(BaseAttack):
-#     def __init__(self, config: Dict[str, Any]):
-#         super().__init__(config)
-#         self.target_class = config.get('target_class', 0)
-#
-#         # [极境架构：显著性寻址 + 正交投影参数]
-#         self.drop_rate = config.get('drop_rate', 0.99)
-#         self.gamma = config.get('gamma', 30.0)
-#         # alpha: 显著性计算中，对主任务梯度的惩罚权重
-#         self.alpha = config.get('alpha', 1.0)
-#
-#         input_dim = config.get('input_dim', 32)
-#         default_size = 5 if input_dim >= 32 else 4
-#         self.trigger_height = config.get('trigger_height', default_size)
-#         self.trigger_width = config.get('trigger_width', default_size)
-#
-#     def get_data_type(self) -> str:
-#         return "image"
-#
-#     def _apply_static_trigger(self, poisoned_data: torch.Tensor, poisoned_labels: torch.Tensor,
-#                               poison_indices: torch.Tensor) -> None:
-#         _, h, w = poisoned_data.shape[1], poisoned_data.shape[2], poisoned_data.shape[3]
-#         row_start, row_end = h - self.trigger_height, h
-#         col_start, col_end = w - self.trigger_width, w
-#         poisoned_data[poison_indices, :, row_start:row_end, col_start:col_end] = 1.0
-#         poisoned_labels[poison_indices] = self.target_class
-#
-#     def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
-#                               global_model_state: Dict[str, torch.Tensor],
-#                               benign_model_state: Dict[str, torch.Tensor] = None,
-#                               algorithm: str = "FedAvg") -> Dict[str, torch.Tensor]:
-#         """
-#         FedDARE 升级版：显著性寻址 (Saliency) + 主干正交投影 (Orthogonal)
-#         """
-#         G_poison_list = []
-#         G_benign_list = []
-#         param_shapes = {}
-#
-#         is_dual_trained = (benign_model_state is not None)
-#
-#         # 1. 展平并提取双轨梯度
-#         for key in local_model_state.keys():
-#             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
-#                 continue
-#
-#             g_p = local_model_state[key].float() - global_model_state[key].float()
-#             G_poison_list.append(g_p.flatten())
-#             param_shapes[key] = g_p.shape
-#
-#             if is_dual_trained:
-#                 g_b = benign_model_state[key].float() - global_model_state[key].float()
-#             else:
-#                 g_b = g_p.clone()
-#
-#             G_benign_list.append(g_b.flatten())
-#
-#         # W_bd (后门梯度) 和 W_main (干净主任务梯度)
-#         G_poison_vec = torch.cat(G_poison_list)
-#         G_benign_vec = torch.cat(G_benign_list)
-#         total_params = G_poison_vec.numel()
-#
-#         # =========================================================
-#         # 步骤 1: 显著性掩码计算 (Saliency-Guided Masking)
-#         # S = |W_bd| - alpha * |W_main|
-#         # =========================================================
-#         saliency = torch.abs(G_poison_vec) - self.alpha * torch.abs(G_benign_vec)
-#
-#         k = max(1, int(total_params * (1.0 - self.drop_rate)))
-#         _, topk_indices = torch.topk(saliency, k)
-#
-#         mask = torch.zeros_like(G_poison_vec)
-#         mask[topk_indices] = 1.0
-#
-#         # =========================================================
-#         # 步骤 2: 主干正交投影 (Orthogonal Projection) -> 骗过 FLTrust / RLR
-#         # =========================================================
-#         if is_dual_trained:
-#             dot_product = torch.dot(G_poison_vec, G_benign_vec)
-#             norm_benign_sq = torch.dot(G_benign_vec, G_benign_vec) + 1e-8
-#             proj_coeff = dot_product / norm_benign_sq
-#
-#             # 剔除平行分量，只保留垂直于主任务的分量 (绝杀 FLTrust)
-#             G_bd_ortho = G_poison_vec - proj_coeff * G_benign_vec
-#         else:
-#             G_bd_ortho = G_poison_vec
-#
-#         # =========================================================
-#         # 步骤 3: 最终合成与能量隐蔽 -> 骗过 Flame
-#         # 客户端实际上传 = 主任务方向 + 放大后的正交后门
-#         # =========================================================
-#         poison_update = self.gamma * (G_bd_ortho * mask)
-#         final_deltas = G_benign_vec + poison_update
-#
-#         # 【安全锁】强制整体 L2 范数不能超过干净梯度的范数，彻底隐身
-#         norm_target = torch.norm(G_benign_vec, p=2)
-#         norm_final = torch.norm(final_deltas, p=2)
-#         if norm_final > norm_target:
-#             final_deltas = final_deltas * (norm_target / (norm_final + 1e-8))
-#
-#         # =========================================================
-#         # 步骤 4: 还原 State Dict
-#         # =========================================================
-#         poisoned_state = {}
-#         offset = 0
-#         for key in local_model_state.keys():
-#             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
-#                 if is_dual_trained:
-#                     poisoned_state[key] = benign_model_state[key].clone()
-#                 else:
-#                     poisoned_state[key] = local_model_state[key].clone()
-#                 continue
-#
-#             numel = param_shapes[key].numel()
-#             p_delta = final_deltas[offset:offset + numel].view(param_shapes[key])
-#
-#             poisoned_state[key] = (global_model_state[key].float() + p_delta).to(local_model_state[key].dtype)
-#             offset += numel
-#
-#         return poisoned_state
-
-import torch
-from typing import Dict, Any
-from core.attacks import BaseAttack
-
 
 class FedDAREAttack(BaseAttack):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.target_class = config.get('target_class', 0)
-
-        # 方案一核心参数
-        self.drop_rate = config.get('drop_rate', 0.99)  # 提取 1% 的核心特征
-
-        # 【关键修复】：后门特征的人为放大系数
-        self.gamma = config.get('gamma', 100.0)  # 默认放大 100 倍
+        self.drop_rate = config.get('drop_rate', 0.99)
+        self.gamma = config.get('gamma', 50.0)
 
         input_dim = config.get('input_dim', 32)
         default_size = 5 if input_dim >= 32 else 4
@@ -1741,17 +995,13 @@ class FedDAREAttack(BaseAttack):
                               global_model_state: Dict[str, torch.Tensor],
                               benign_model_state: Dict[str, torch.Tensor] = None,
                               algorithm: str = "FedAvg") -> Dict[str, torch.Tensor]:
-        """
-        完整复原文档【方案一】：显著性变色龙替换 + 后门特征人为放大
-        """
         if benign_model_state is None:
-            raise ValueError("方案一必须依赖 benign_model_state 进行变色龙融合！")
+            raise ValueError("FedDAREAttack 必须依赖 benign_model_state！")
 
         G_poison_list = []
         G_benign_list = []
         param_shapes = {}
 
-        # 1. 展平提取双轨梯度
         for key in local_model_state.keys():
             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
                 continue
@@ -1766,11 +1016,7 @@ class FedDAREAttack(BaseAttack):
         G_poison_vec = torch.cat(G_poison_list)
         G_benign_vec = torch.cat(G_benign_list)
 
-        # =========================================================
-        # 步骤 1: 显著性掩码生成 (Saliency Masking)
-        # =========================================================
         saliency = torch.abs(G_poison_vec - G_benign_vec)
-
         k = max(1, int(saliency.numel() * (1.0 - self.drop_rate)))
         _, topk_indices = torch.topk(saliency, k)
 
@@ -1778,18 +1024,8 @@ class FedDAREAttack(BaseAttack):
         mask_bd[topk_indices] = 1.0
         mask_benign = 1.0 - mask_bd
 
-        # =========================================================
-        # 步骤 2: 变色龙融合 + 【人为放大】
-        # 将选出的 1% 真实后门梯度放大 gamma 倍，99% 伪装成真实良性梯度
-        # =========================================================
-        V_bd_amplified = (G_poison_vec * mask_bd) * self.gamma
-        V_benign_cloak = G_benign_vec * mask_benign
+        G_upload = mask_bd * (G_poison_vec * self.gamma) + mask_benign * G_benign_vec
 
-        G_upload = V_bd_amplified + V_benign_cloak
-
-        # =========================================================
-        # 还原 State Dict
-        # =========================================================
         poisoned_state = {}
         offset = 0
         for key in local_model_state.keys():
@@ -1798,12 +1034,12 @@ class FedDAREAttack(BaseAttack):
                 continue
 
             numel = param_shapes[key].numel()
-            p_delta = G_upload[offset:offset + numel].view(param_shapes[key])
-
+            p_delta = G_upload[offset:offset+numel].view(param_shapes[key])
             poisoned_state[key] = (global_model_state[key].float() + p_delta).to(local_model_state[key].dtype)
             offset += numel
 
         return poisoned_state
+
 
 class LayerwisePoisoningAttack(BadNetsAttack):
     def __init__(self, config: Dict[str, Any]):
@@ -2422,9 +1658,6 @@ class IBAAttack:
 class DarkFedAttack(BaseAttack):
     """
     DarkFed: A Data-Free Backdoor Attack in Federated Learning (IJCAI 2024)
-    核心机制:
-    1. Data-Free (无数据投毒): 使用影子数据集(此处用纯随机噪声替代)来植入后门。
-    2. Property Mimicry (属性伪装): 将噪声训练出的异常梯度，强制投影到良性分布范围内。
     """
 
     def __init__(self, config: Dict[str, Any]):
@@ -2432,7 +1665,6 @@ class DarkFedAttack(BaseAttack):
         self.target_class = config.get('target_class', 0)
         self.trigger_size = config.get('trigger_width', 5)
 
-        # 属性伪装的安全范数上限 (根据当前模型良性更新的普遍大小设定，默认为2.0)
         self.safe_norm_bound = config.get('safe_norm_bound', 2.0)
 
     def use_model_trigger(self):
@@ -2443,17 +1675,12 @@ class DarkFedAttack(BaseAttack):
 
     def _apply_static_trigger(self, poisoned_data: torch.Tensor, poisoned_labels: torch.Tensor,
                               poison_indices: torch.Tensor) -> None:
-        """
-        Data-Free 投毒：直接抹除原图的所有语义信息，替换为随机噪声 + 触发器
-        """
         _, h, w = poisoned_data.shape[1], poisoned_data.shape[2], poisoned_data.shape[3]
 
         for idx in poison_indices:
-            # [核心 1] 数据无关：用完全随机的噪声 (Shadow Data) 覆盖原始图像
-            noise = torch.rand_like(poisoned_data[idx])  # 生成 [0, 1] 范围的均匀噪声
+            noise = torch.rand_like(poisoned_data[idx])
             poisoned_data[idx] = noise
 
-            # 在纯噪声图像的右下角植入后门触发器
             row_start = h - self.trigger_size
             row_end = h
             col_start = w - self.trigger_size
@@ -2461,25 +1688,19 @@ class DarkFedAttack(BaseAttack):
 
             poisoned_data[idx, :, row_start:row_end, col_start:col_end] = 1.0
 
-            # 标签篡改
             poisoned_labels[idx] = self.target_class
 
     def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
                               global_model_state: Dict[str, torch.Tensor],
                               algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
-        """
-        Property Mimicry (属性伪装)：将基于噪声训练的异常梯度强制伪装成正常的良性梯度
-        """
         poisoned_state = {}
 
-        # 1. 计算本地模型相对于全局模型的原始更新量 (Delta)
         update_dict = {}
         for key in local_model_state.keys():
             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
                 continue
             update_dict[key] = (local_model_state[key].cpu() - global_model_state[key].cpu()).float()
 
-        # 2. 提取更新量的全局 L2 范数
         vec_list = [v.numpy().flatten() for v in update_dict.values()]
         if not vec_list:
             return local_model_state
@@ -2492,16 +1713,12 @@ class DarkFedAttack(BaseAttack):
         if current_norm == 0:
             return local_model_state
 
-        # [核心 2] 属性伪装：由于使用了完全随机的噪声训练，梯度往往会异常且发散
-        # 我们必须对其范数进行硬性裁剪，使其范数与良性客户端保持绝对一致
         scale_factor = 1.0
         if current_norm > self.safe_norm_bound:
             scale_factor = self.safe_norm_bound / current_norm
 
-        # 3. 将伪装并裁剪后的更新加回全局模型
         with torch.no_grad():
             for key in local_model_state.keys():
-                # 保持 BN 层的统计特征不变，这也是属性伪装的重要一环
                 if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
                     poisoned_state[key] = local_model_state[key].clone()
                     continue

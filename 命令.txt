@@ -15,7 +15,7 @@ python gen_exps_config.py --attack  feddare --output configs/exp1 --dataset cifa
 dba blended sinusoidal labelflipping edgecase threedfed modelreplacement neurotoxin
 badnets feddare layerwisepoisoning minmax trim krum cerp a3fl fcba iba darkfed
 
-blended labelflipping sinusoidal      RLR
+
 
 
 FedAvg FedSGD FedProx SCAFFOLD FedOpt Krum MultiKrum NormClipping WeakDP CRFL Bulyan CoordinateWiseMedian TrimmedMean FLTrust FLDetector Flame DeepSight

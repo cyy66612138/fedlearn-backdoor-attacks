@@ -535,9 +535,11 @@ def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, tar
             'target_class': target_label,
 
             # 【方案一核心】
-            'drop_rate': 0.99,
+            'drop_rate': 0.9,
             # 【方案一核心：人为放大】
             'gamma': 10.0,
+
+            # 'alpha': 0.5,  # 如果发现 Flame 还是拦了，直接狠一点把 alpha 调成 0.3 或 0.1
 
             'trigger_height': default_size,
             'trigger_width': default_size,
