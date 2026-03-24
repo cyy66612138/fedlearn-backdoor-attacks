@@ -88,13 +88,28 @@ class FLClient:
         dataloader = DataLoader(self.dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=False, generator=local_generator)
 
         has_active_attack = self._has_active_attack_this_round(round_idx)
-        # epochs_to_run = epochs if not has_active_attack else self.config.get('adversarial_epochs', 6)
-        epochs_to_run = epochs
 
-        # 1. 干净的预演轨 (仅为原版方案提取良性基底)
+        # --- 动态调整 Epoch 逻辑 ---
+        if has_active_attack:
+            # 如果是恶意客户端，在此处硬编码或从配置读取倍率
+            # 建议设置为 5 或者 epochs * 2.5
+            epochs_to_run = 2
+            print(f"   [🔥 Attack Boost] Client {self.client_id} is attacking, boosting local epochs to {epochs_to_run}")
+        else:
+            # 良性客户端维持原状
+            epochs_to_run = epochs
+
+        # 1. 干净的预演轨 (提取良性基底)
         benign_model_state_for_attack = None
-        if has_active_attack and any(a.__class__.__name__ == 'FedDAREAttack' and a.should_apply(round_idx) for a in self.attacks):
-            print(f"   [FedDARE] Client {self.client_id} running benign track for mask base...")
+
+        # [修改点] 将 LayerwisePoisoningAttack 也加入到需要跑 benign track 的判断条件中
+        needs_benign_track = has_active_attack and any(
+            (a.__class__.__name__ in ['FedDAREAttack', 'LayerwisePoisoningAttack']) and a.should_apply(round_idx)
+            for a in self.attacks
+        )
+
+        if needs_benign_track:
+            print(f"   [Benign Track] Client {self.client_id} running benign track for mask proxy...")
             initial_state = {k: v.clone() for k, v in self.model.state_dict().items()}
             for epoch in range(epochs_to_run):
                 for batch_idx, (data, target) in enumerate(dataloader):
@@ -108,12 +123,11 @@ class FLClient:
             benign_model_state_for_attack = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
             self.model.load_state_dict(initial_state)
 
-            # 重置优化器状态
             opt_name = self.config['federated_learning'].get('optimizer', 'SGD')
             if opt_name == "SGD": self.optimizer = optim.SGD(self.model.parameters(), lr=self.config['federated_learning']['learning_rate'], momentum=self.config['federated_learning']['momentum'], weight_decay=self.config['federated_learning']['weight_decay'])
             elif opt_name == "Adam": self.optimizer = optim.Adam(self.model.parameters(), lr=self.config['federated_learning']['learning_rate'], weight_decay=self.config['federated_learning']['weight_decay'])
 
-        # 2. 纯正的带毒训练 (无任何 PGD 或 L2 限制)
+        # 2. 纯正的带毒训练 (无任何限制)
         epoch_loss, epoch_correct, epoch_samples = 0.0, 0, 0
         start_time = time.time()
         for epoch in range(epochs_to_run):
@@ -139,6 +153,14 @@ class FLClient:
 
             if epoch == epochs_to_run - 1:
                 print(f"   Client {self.client_id}, Epoch {epoch+1}/{epochs_to_run}, Loss: {epoch_loss/epoch_samples:.4f}, Acc: {epoch_correct/epoch_samples:.4f}, Time: {time.time() - start_time:.2f}s")
+
+        # [新增核心逻辑] 为需要 LSA (Layer Substitution) 的攻击挂载本地模型和测试数据环境
+        if has_active_attack:
+            for attack in self.attacks:
+                if attack.should_apply(round_idx) and hasattr(attack, 'setup_lsa_environment'):
+                    # 传入不需要 shuffle 的 dataloader 以保证 LSA 测试的前后对比一致性
+                    lsa_loader = DataLoader(self.dataset, batch_size=batch_size, shuffle=False)
+                    attack.setup_lsa_environment(self.model, lsa_loader, self.device)
 
         # 3. 提交给 attacks.py 组装
         with torch.no_grad():

@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import pickle
 import copy
 import torch.nn as nn
+import math
 
 def dump_poisoned_images(clean_imgs: torch.Tensor, clean_labels: torch.Tensor,
                         poison_indices: torch.Tensor,
@@ -967,21 +968,41 @@ class DBAAttack(BaseAttack):
     def get_data_type(self) -> str:
         return "image"
 
-
+# =========================================================================
+# 🚀 终极破防框架：Sign-Aligned BC-DARE (全量同向渗透 + 策略A截断)
+# 核心亮点：基于 Layer Substitution Analysis (LSA) 严格测算 BSR 下降 (含动态周期刷新)
+# =========================================================================
 class FedDAREAttack(BaseAttack):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.target_class = config.get('target_class', 0)
+        # 严格执行全局 1% 预算 (如 0.99 则为 1%)
         self.drop_rate = config.get('drop_rate', 0.99)
-        self.gamma = config.get('gamma', 50.0)
+        self.gamma = config.get('gamma', 50.0)  # 恢复 Gamma 放大，默认 50 倍
 
         input_dim = config.get('input_dim', 32)
         default_size = 5 if input_dim >= 32 else 4
         self.trigger_height = config.get('trigger_height', default_size)
         self.trigger_width = config.get('trigger_width', default_size)
 
+        # 缓存与 LSA 环境参数
+        self.lsa_model = None
+        self.lsa_dataloader = None
+        self.lsa_device = None
+        self.cached_layer_scores = None
+        self.cached_score_sum = None
+
+        # 动态 LSA 测算计数器
+        self.attack_invoke_count = 0
+        self.lsa_recompute_interval = 1  # 每 10 轮重测一次
+
     def get_data_type(self) -> str:
         return "image"
+
+    def setup_lsa_environment(self, model: torch.nn.Module, dataloader: Any, device: torch.device):
+        self.lsa_model = model
+        self.lsa_dataloader = dataloader
+        self.lsa_device = device
 
     def _apply_static_trigger(self, poisoned_data: torch.Tensor, poisoned_labels: torch.Tensor,
                               poison_indices: torch.Tensor) -> None:
@@ -991,148 +1012,344 @@ class FedDAREAttack(BaseAttack):
         poisoned_data[poison_indices, :, row_start:row_end, col_start:col_end] = 1.0
         poisoned_labels[poison_indices] = self.target_class
 
+    def _evaluate_bsr(self, eval_model: torch.nn.Module) -> float:
+        """【绝对严格】：跑完整个 dataloader，不准 break"""
+        correct, total = 0, 0
+        eval_model.eval()
+        with torch.no_grad():
+            for data, target in self.lsa_dataloader:
+                data = data.to(self.lsa_device)
+                poisoned_data = data.clone()
+                poison_indices = torch.arange(data.shape[0])
+                poisoned_data = self._denormalize(poisoned_data)
+                dummy_labels = torch.zeros(data.shape[0], dtype=torch.long, device=self.lsa_device)
+                self._apply_static_trigger(poisoned_data, dummy_labels, poison_indices)
+                poisoned_data = self._normalize(poisoned_data)
+                outputs = eval_model(poisoned_data)
+                _, predicted = torch.max(outputs.data, 1)
+                total += data.size(0)
+                correct += (predicted == self.target_class).sum().item()
+        return correct / total if total > 0 else 0.0
+
     def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
                               global_model_state: Dict[str, torch.Tensor],
                               benign_model_state: Dict[str, torch.Tensor] = None,
                               algorithm: str = "FedAvg") -> Dict[str, torch.Tensor]:
         if benign_model_state is None:
-            raise ValueError("FedDAREAttack 必须依赖 benign_model_state！")
+            raise ValueError("Sign-Aligned BC-DARE 必须依赖 benign_model_state！")
 
-        G_poison_list = []
-        G_benign_list = []
+        G_poison = {}
+        G_benign = {}
         param_shapes = {}
+        total_params = 0
 
         for key in local_model_state.keys():
             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
                 continue
+            G_poison[key] = local_model_state[key].float() - global_model_state[key].float()
+            G_benign[key] = benign_model_state[key].float() - global_model_state[key].float()
+            param_shapes[key] = G_poison[key].shape
+            total_params += G_poison[key].numel()
 
-            g_p = local_model_state[key].float() - global_model_state[key].float()
-            g_b = benign_model_state[key].float() - global_model_state[key].float()
+        # =========================================================================
+        # 步骤 1：严格 LSA 打分 (动态周期刷新)
+        # =========================================================================
+        force_recompute = (self.attack_invoke_count % self.lsa_recompute_interval == 0)
 
-            G_poison_list.append(g_p.flatten())
-            G_benign_list.append(g_b.flatten())
-            param_shapes[key] = g_p.shape
+        if self.cached_layer_scores is None or force_recompute:
+            print(f"\n   [Sign-Aligned BC-DARE] {'首次' if not force_recompute else '周期性'}执行严格 LSA 打分...")
+            layer_scores = {}
+            score_sum = 0.0
+            self.lsa_model = self.lsa_model.to(self.lsa_device)
+            self.lsa_model.load_state_dict(local_model_state)
+            bsr_malicious = self._evaluate_bsr(self.lsa_model)
 
-        G_poison_vec = torch.cat(G_poison_list)
-        G_benign_vec = torch.cat(G_benign_list)
+            for key in G_poison.keys():
+                hybrid_state = {k: v.clone() for k, v in local_model_state.items()}
+                hybrid_state[key] = benign_model_state[key].clone()
+                self.lsa_model.load_state_dict(hybrid_state)
+                bsr_hybrid = self._evaluate_bsr(self.lsa_model)
 
-        saliency = torch.abs(G_poison_vec - G_benign_vec)
-        k = max(1, int(saliency.numel() * (1.0 - self.drop_rate)))
-        _, topk_indices = torch.topk(saliency, k)
+                delta_bsr = bsr_malicious - bsr_hybrid
+                # 严格按照“非负即投毒”：使用微小 epsilon (1e-9) 确保 0 分层也能入选
+                score = max(1e-9, delta_bsr)
+                layer_scores[key] = score
+                score_sum += score
 
-        mask_bd = torch.zeros_like(G_poison_vec)
-        mask_bd[topk_indices] = 1.0
-        mask_benign = 1.0 - mask_bd
+                # [加回来的打印逻辑]：只打印杀伤力大于 0 的层，避免 60 多个 0 分层刷屏
+                if delta_bsr > 0:
+                    print(f"   [LSA] 层 {key:<30} | 真实杀伤力 (Delta BSR): {delta_bsr:.4f}")
 
-        G_upload = mask_bd * (G_poison_vec * self.gamma) + mask_benign * G_benign_vec
+            self.cached_layer_scores = layer_scores
+            self.cached_score_sum = score_sum
+            self.lsa_model = self.lsa_model.cpu()
+        else:
+            layer_scores = self.cached_layer_scores
+            score_sum = self.cached_score_sum
 
+        # =========================================================================
+        # 步骤 2：策略 B —— 迭代式水箱平衡分配 (Iterative Water-filling)
+        # 目标：100% 耗尽预算，同时遵守“符号锁定”
+        # =========================================================================
+        global_budget = int(total_params * (1.0 - self.drop_rate))
+        remaining_budget = global_budget
+
+        # 预存所有层的“合规候选人”并排序
+        layer_candidates = {}
+        for key in G_poison.keys():
+            g_p_flat = G_poison[key].flatten().to(self.lsa_device)
+            g_b_flat = G_benign[key].flatten().to(self.lsa_device)
+
+            # [符号锁定]
+            sign_mask = (torch.sign(g_p_flat) == torch.sign(g_b_flat))
+            candidate_indices = torch.where(sign_mask)[0]
+
+            if len(candidate_indices) > 0:
+                epsilon = 1e-8
+                saliency = (torch.abs(g_p_flat[candidate_indices]) / (torch.abs(g_b_flat[candidate_indices]) + epsilon))
+                sorted_inner = torch.argsort(saliency, descending=True)
+                layer_candidates[key] = candidate_indices[sorted_inner].tolist()
+            else:
+                layer_candidates[key] = []
+
+        # 迭代分配循环
+        final_selections = {key: [] for key in G_poison.keys()}
+        active_layers = [k for k in layer_scores.keys() if len(layer_candidates[k]) > 0]
+
+        while remaining_budget > 0 and len(active_layers) > 0:
+            current_total_score = sum(layer_scores[k] for k in active_layers)
+            layers_to_remove = []
+
+            # 记录当前剩余预算，准备分摊
+            budget_to_distribute = remaining_budget
+
+            for key in active_layers:
+                # 严格按比例分配
+                allocation = int(math.floor(budget_to_distribute * (layer_scores[key] / current_total_score)))
+                # 防死锁保底
+                if allocation == 0 and remaining_budget > 0: allocation = 1
+
+                take = min(allocation, len(layer_candidates[key]), remaining_budget)
+
+                if take > 0:
+                    final_selections[key].extend(layer_candidates[key][:take])
+                    layer_candidates[key] = layer_candidates[key][take:]
+                    remaining_budget -= take
+
+                if len(layer_candidates[key]) == 0:
+                    layers_to_remove.append(key)
+
+                if remaining_budget <= 0: break
+
+            for k in layers_to_remove: active_layers.remove(k)
+
+        # =========================================================================
+        # 步骤 3：拼装写回
+        # =========================================================================
         poisoned_state = {}
-        offset = 0
         for key in local_model_state.keys():
-            if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
+            if key not in G_poison:
                 poisoned_state[key] = benign_model_state[key].clone()
                 continue
 
-            numel = param_shapes[key].numel()
-            p_delta = G_upload[offset:offset+numel].view(param_shapes[key])
-            poisoned_state[key] = (global_model_state[key].float() + p_delta).to(local_model_state[key].dtype)
-            offset += numel
+            g_p_flat = G_poison[key].flatten().to(self.lsa_device)
+            g_b_flat = G_benign[key].flatten().to(self.lsa_device)
 
+            # 构造掩码
+            selection_mask = torch.zeros_like(g_p_flat)
+            if final_selections[key]:
+                selection_mask[torch.tensor(final_selections[key], device=self.lsa_device)] = 1.0
+
+                # 带有 Gamma 放大的强力组装
+                final_g_layer = selection_mask * (g_p_flat * self.gamma) + (1.0 - selection_mask) * g_b_flat
+            p_delta = final_g_layer.reshape(*param_shapes[key]).cpu()
+            poisoned_state[key] = (global_model_state[key].float() + p_delta).to(local_model_state[key].dtype)
+
+        used_total = global_budget - remaining_budget
+        print(f"   [Sign-Aligned BC-DARE] 策略 B 执行完毕：耗尽预算 {used_total}/{global_budget}")
+        print(
+            f"   [Sign-Aligned BC-DARE] 预算利用率: {(used_total / global_budget) * 100:.2f}% (剩余 {remaining_budget} 为候选池物理枯竭)\n")
+
+        self.attack_invoke_count += 1
         return poisoned_state
 
 
 class LayerwisePoisoningAttack(BadNetsAttack):
+    """
+    严格复现 ICLR 2024: BACKDOOR FEDERATED LEARNING BY POISONING BACKDOOR-CRITICAL LAYERS (LP Attack)
+    基于官方开源仓库 models/Attacker.py 中的逻辑重写
+    """
+
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.lambda_val = config.get('lambda_val', 2.0)
-        self.lsa_bsr_threshold = config.get('lsa_bsr_threshold', 0.5)
+        # 对应官方选项 --cifar_scale (1.0) / --cnn_scale (0.5)，控制隐身与放大
+        self.lambda_val = config.get('lambda_val', 1.0)
+        # 对应官方选项 --mode10_tau (0.95)，控制 m2b 的恢复阈值
+        self.tau = config.get('tau', 0.95)
 
         self.lsa_model = None
         self.lsa_dataloader = None
         self.lsa_device = None
+        self.cached_bc_layers = None
+
+        self.attack_invoke_count = 0
+        # 为了加速联邦学习实验，每隔若干轮重新测算一次 BC 层
+        self.lsa_recompute_interval = config.get('lsa_recompute_interval', 1)
 
     def setup_lsa_environment(self, model: torch.nn.Module, dataloader: Any, device: torch.device):
+        """由 client.py 在每轮训练前调用，挂载 LSA 环境"""
         self.lsa_model = model
         self.lsa_dataloader = dataloader
         self.lsa_device = device
 
-    def _run_dynamic_lsa(self, benign_state: Dict[str, torch.Tensor],
-                         malicious_state: Dict[str, torch.Tensor]) -> List[str]:
+    def _evaluate_bsr(self, eval_model: torch.nn.Module) -> float:
+        """评估给定模型上的后门成功率 (BSR)"""
+        correct, total = 0, 0
+        eval_model.eval()
+        with torch.no_grad():
+            for data, target in self.lsa_dataloader:
+                data = data.to(self.lsa_device)
+                poisoned_data = data.clone()
+                poison_indices = torch.arange(data.shape[0])
+
+                poisoned_data = self._denormalize(poisoned_data)
+                dummy_labels = torch.zeros(data.shape[0], dtype=torch.long, device=self.lsa_device)
+                # 动态打上 Trigger，且将 Label 设为 Target Class
+                self._apply_static_trigger(poisoned_data, dummy_labels, poison_indices)
+                poisoned_data = self._normalize(poisoned_data)
+
+                outputs = eval_model(poisoned_data)
+                _, predicted = torch.max(outputs.data, 1)
+
+                total += data.size(0)
+                correct += (predicted == self.target_class).sum().item()
+        return correct / total if total > 0 else 0.0
+
+    def _run_lsa_and_find_bc_layers(self, benign_state_proxy: Dict[str, torch.Tensor],
+                                    malicious_state: Dict[str, torch.Tensor]) -> List[str]:
+        """严格执行官方代码的 FLS (Forward) 和 BLS (Backward) 层替换分析"""
         if self.lsa_model is None or self.lsa_dataloader is None:
-            raise ValueError("LSA Environment not setup!")
+            raise ValueError("LSA Environment not setup! Make sure client.py calls setup_lsa_environment.")
 
         self.lsa_model = self.lsa_model.to(self.lsa_device)
-        self.lsa_model.eval()
+        print(f"\n   [{self.name}] 严格执行官方 LP b2m / m2b 分析流程...")
 
-        def evaluate_pure_bsr(eval_model):
-            correct, total = 0, 0
-            with torch.no_grad():
-                for batch_idx, (data, _) in enumerate(self.lsa_dataloader):
-                    if batch_idx > 0: break
+        # 1. 测算满毒模型基准 BSR (对应官方 FLS 函数准备阶段)
+        self.lsa_model.load_state_dict(malicious_state)
+        bsr_malicious = self._evaluate_bsr(self.lsa_model)
+        print(f"   [{self.name}] 基准恶意模型 BSR: {bsr_malicious:.4f}")
 
-                    data = data.to(self.lsa_device)
-                    poisoned_data = data.clone()
-                    poison_indices = torch.arange(data.shape[0])
+        if bsr_malicious == 0:
+            print(f"   [{self.name}] 警告：恶意模型 BSR 为 0，降级为全层攻击。")
+            return list(malicious_state.keys())
 
-                    poisoned_data = self._denormalize(poisoned_data)
-                    dummy_labels = torch.zeros(data.shape[0], dtype=torch.long)
-                    self._apply_static_trigger(poisoned_data, dummy_labels, poison_indices)
-                    poisoned_data = self._normalize(poisoned_data)
-
-                    outputs = eval_model(poisoned_data)
-                    _, predicted = torch.max(outputs.data, 1)
-
-                    total += data.size(0)
-                    correct += (predicted == self.target_class).sum().item()
-
-            return correct / total if total > 0 else 0.0
-
-        print(f"[{self.name}] Running In-situ LSA on GPU for dynamic BC layers discovery...")
-        layer_bsr_scores = {}
-
-        for layer_name in benign_state.keys():
+        # 2. b2m 前向替换打分 (对应官方 FLS 函数中的循环)
+        layer_delta_bsr = {}
+        for layer_name in malicious_state.keys():
             if 'num_batches_tracked' in layer_name or 'running_mean' in layer_name or 'running_var' in layer_name:
                 continue
 
-            hybrid_state = {k: v.clone() for k, v in benign_state.items()}
-            hybrid_state[layer_name] = malicious_state[layer_name].clone()
+            # Hybrid 模型：主体是恶意的，唯独把当前层换成纯净的
+            hybrid_state = {k: v.clone() for k, v in malicious_state.items()}
+            hybrid_state[layer_name] = benign_state_proxy[layer_name].clone()
 
             self.lsa_model.load_state_dict(hybrid_state)
-            layer_bsr_scores[layer_name] = evaluate_pure_bsr(self.lsa_model)
+            bsr_hybrid = self._evaluate_bsr(self.lsa_model)
 
+            # 计算因果破坏力 (Delta BSR)
+            delta_bsr = bsr_malicious - bsr_hybrid
+            layer_delta_bsr[layer_name] = max(0.0, delta_bsr)
+
+            if delta_bsr > 0:
+                print(f"   [{self.name}] b2m 替换层 {layer_name:<25} | Delta BSR: {delta_bsr:.4f}")
+
+        # 按照破坏力降序排列
+        sorted_layers = sorted(layer_delta_bsr.items(), key=lambda x: x[1], reverse=True)
+
+        # 3. m2b 后向替换验证 (对应官方 BLS_weight 函数)
+        print(f"   [{self.name}] 执行 m2b 后向验证, 寻找满足 tau={self.tau} 的最小 BC 集合...")
+        target_bsr = self.tau * bsr_malicious
+        bc_layers_found = []
+
+        # 从全纯净模型起步
+        m2b_state = {k: v.clone() for k, v in benign_state_proxy.items()}
+
+        for layer_name, score in sorted_layers:
+            # 依次将破坏力最强的恶意层塞回去
+            m2b_state[layer_name] = malicious_state[layer_name].clone()
+            bc_layers_found.append(layer_name)
+
+            self.lsa_model.load_state_dict(m2b_state)
+            current_m2b_bsr = self._evaluate_bsr(self.lsa_model)
+
+            if current_m2b_bsr >= target_bsr:
+                print(
+                    f"   [{self.name}] m2b 锁定完成! 命中 {len(bc_layers_found)} 个 BC 层 (当前 BSR: {current_m2b_bsr:.4f}).")
+                break
+
+        # 还原设备环境
         self.lsa_model.load_state_dict(malicious_state)
         self.lsa_model = self.lsa_model.cpu()
-
-        sorted_layers = sorted(layer_bsr_scores.items(), key=lambda x: x[1], reverse=True)
-        bc_ratio = self.config.get('bc_layer_ratio', 0.05)
-        k = max(2, int(len(sorted_layers) * bc_ratio))
-        bc_layers_found = [layer_name for layer_name, score in sorted_layers[:k]]
-        print(f"[{self.name}] LSA completed in < 1s. Top {k} BC layers this round: {bc_layers_found}")
-
         return bc_layers_found
 
     def apply_model_poisoning(self,
                               local_model_state: Dict[str, torch.Tensor],
                               global_model_state: Dict[str, torch.Tensor],
-                              algorithm: str = 'FedAvg') -> Dict[str, torch.Tensor]:
+                              benign_model_state: Dict[str, torch.Tensor] = None,
+                              algorithm: str = 'FedAvg',
+                              **kwargs) -> Dict[str, torch.Tensor]:
 
-        dynamic_bc_layers = self._run_dynamic_lsa(global_model_state, local_model_state)
+        # 官方逻辑的核心：必须存在 benign_w (纯净代理) 才能实现完美的隐身
+        if benign_model_state is None:
+            print(f"   [{self.name}] 警告：未检测到 benign_model_state，降级使用 global_model_state 作为良性代理。")
+            benign_model_state = global_model_state
+
+        force_recompute = (self.attack_invoke_count % self.lsa_recompute_interval == 0)
+
+        if self.cached_bc_layers is None or force_recompute:
+            dynamic_bc_layers = self._run_lsa_and_find_bc_layers(benign_model_state, local_model_state)
+            self.cached_bc_layers = dynamic_bc_layers
+        else:
+            rounds_left = self.lsa_recompute_interval - (self.attack_invoke_count % self.lsa_recompute_interval)
+            print(
+                f"   [{self.name}] 重用已缓存的 {len(self.cached_bc_layers)} 个 BC 层 (距下次重测还有 {rounds_left} 轮)。")
+            dynamic_bc_layers = self.cached_bc_layers
+
+        self.attack_invoke_count += 1
 
         poisoned_state = {}
+        bc_param_count = 0
+        total_param_count = 0
+
+        # =====================================================================
+        # 严格复刻官方 Github 中 models/Attacker.py 的 craft_model()
+        # =====================================================================
         for key in local_model_state.keys():
             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
                 poisoned_state[key] = local_model_state[key].clone()
                 continue
 
+            total_param_count += local_model_state[key].numel()
             is_bc_layer = key in dynamic_bc_layers
 
             if is_bc_layer:
-                delta = local_model_state[key].float() - global_model_state[key].float()
-                poisoned_delta = delta * self.lambda_val
+                # 官方公式: crafted = global + lambda*(malicious - global) + max(0, 1-lambda)*(benign - global)
+                # 实现了: lambda <= 1 时为平滑插值，lambda > 1 时转化为暴力 Scaling Attack
+                delta_m = local_model_state[key].float() - global_model_state[key].float()
+                delta_b = benign_model_state[key].float() - global_model_state[key].float()
+
+                poisoned_delta = (self.lambda_val * delta_m) + (max(0.0, 1.0 - self.lambda_val) * delta_b)
                 poisoned_state[key] = (global_model_state[key].float() + poisoned_delta).to(
                     local_model_state[key].dtype)
+                bc_param_count += local_model_state[key].numel()
             else:
-                poisoned_state[key] = global_model_state[key].clone()
+                # 官方隐身灵魂：对于非 BC 层，并非抛弃，而是上传该客户端训练出来的纯净参数 (benign_model_state)
+                # 这极大地伪装了 L2 距离的分布。
+                poisoned_state[key] = benign_model_state[key].clone()
+
+        if total_param_count > 0:
+            print(
+                f"   [{self.name}] 官方 LP 组装完毕: 毒化 {len(dynamic_bc_layers)} 个层 (占参数 {(bc_param_count / total_param_count) * 100:.2f}%)，Lambda = {self.lambda_val}\n")
 
         return poisoned_state
 
