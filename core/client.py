@@ -88,7 +88,8 @@ class FLClient:
         dataloader = DataLoader(self.dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=False, generator=local_generator)
 
         has_active_attack = self._has_active_attack_this_round(round_idx)
-        epochs_to_run = epochs if not has_active_attack else self.config.get('adversarial_epochs', 6)
+        # epochs_to_run = epochs if not has_active_attack else self.config.get('adversarial_epochs', 6)
+        epochs_to_run = epochs
 
         # 1. 干净的预演轨 (仅为原版方案提取良性基底)
         benign_model_state_for_attack = None
