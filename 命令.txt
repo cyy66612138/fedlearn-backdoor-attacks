@@ -13,18 +13,28 @@ ps -u root -f | grep python
 grep -oP "python -u run_federated\.py --config \S+ --gpu \d+" commands-v3.txt > tasks.txt
 
 python tmux_queue.py
+tmux attach -t EXP_QUEUE
 
-python gen_exps_config.py --attack  feddare layerwisepoisoning  --output configs/exp3 --dataset cifar10 --aggregation FedAvg FedSGD FedProx SCAFFOLD FedOpt Krum MultiKrum NormClipping WeakDP CRFL Bulyan CoordinateWiseMedian TrimmedMean FLTrust FLDetector Flame DeepSight RFA CenteredClipping SimpleClustering FoolsGold RLR MultiMetric DnC FLARE LASA Bucketing AUROR SignGuard Mean  --base configs/base.yaml
+python tmux_queue_dynamic.py
+# 查看已完成多少个
+ls dynamic_completed/*.done 2>/dev/null | wc -l
+# 查看还有多少个待执行
+ls dynamic_tasks/ 2>/dev/null | wc -l
+
+python gen_exps_config.py --attack  feddare layerwisepoisoning a3fl iba labelflipping  --output configs/exp3 --dataset cifar10 --aggregation FedAvg FedSGD FedProx SCAFFOLD FedOpt Krum MultiKrum NormClipping WeakDP CRFL Bulyan CoordinateWiseMedian TrimmedMean FLTrust FLDetector Flame DeepSight RFA CenteredClipping SimpleClustering FoolsGold RLR MultiMetric DnC FLARE LASA Bucketing AUROR SignGuard Mean  --base configs/base.yaml
 
 dba blended sinusoidal labelflipping edgecase threedfed modelreplacement neurotoxin
 badnets feddare layerwisepoisoning minmax trim krum cerp a3fl fcba iba darkfed
 
 
-python gen_exps_config.py --attack  layerwisepoisoning   --output configs/exp3 --dataset cifar10 --aggregation FedAvg MultiKrum FLTrust Flame MultiMetric DnC RLR FLARE  --base configs/base.yaml
+python gen_exps_config.py --attack   threedfed modelreplacement neurotoxin badnets   minmax trim krum cerp a3fl fcba iba darkfed --output configs/exp3 --dataset cifar10 --aggregation FedAvg Bucketing CRFL DeepSight FLARE FLDetector FLTrust NormClipping RLR SCAFFOLD SimpleClustering WeakDP  --base configs/base.yaml
 
 
 
-FedAvg FedSGD FedProx SCAFFOLD FedOpt Krum MultiKrum NormClipping WeakDP CRFL Bulyan CoordinateWiseMedian TrimmedMean FLTrust FLDetector Flame DeepSight
-RFA CenteredClipping SimpleClustering FoolsGold RLR MultiMetric DnC FLARE LASA Bucketing AUROR SignGuard Mean
+FedAvg FedSGD FedProx SCAFFOLD FedOpt Krum MultiKrum NormClipping WeakDP CRFL Bulyan CoordinateWiseMedian
+TrimmedMean FLTrust FLDetector Flame DeepSight RFA CenteredClipping SimpleClustering FoolsGold RLR
+MultiMetric DnC FLARE LASA Bucketing AUROR SignGuard Mean
 
 baseline:FedAvg MultiKrum FLTrust Flame MultiMetric DnC RLR FLARE
+
+FedAvg Bucketing CRFL DeepSight FLARE FLDetector FLTrust NormClipping RLR SCAFFOLD SimpleClustering WeakDP

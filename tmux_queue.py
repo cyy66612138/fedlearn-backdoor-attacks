@@ -29,9 +29,11 @@ for i in range(NUM_PARALLEL):
         subprocess.run(f"tmux split-window -t {SESSION_NAME}", shell=True)
         subprocess.run(f"tmux select-layout -t {SESSION_NAME} tiled", shell=True)
 
-    # 构建该窗格的串行命令流：cmd1 && cmd2 && cmd3...
-    # 这样当 cmd1 跑完，该窗格会自动开始跑下一个，而不会占用新的显存
-    pane_cmds = " && ".join(queues[i])
+    # 构建该窗格的串行命令流：使用分号 (;) 代替 &&
+    # 这样即使前一个实验报错，窗格也会自动开始跑下一个
+    # 加入了华丽的分割线和 2 秒的缓冲时间，方便观察日志并让系统回收显存
+    separator = " ; echo '\n=======================================\n' ; sleep 2 ; "
+    pane_cmds = separator.join(queues[i])
 
     # 发送到 Tmux 窗格执行
     subprocess.run(f"tmux send-keys -t {SESSION_NAME}.{i} \"{pane_cmds}\" C-m", shell=True)

@@ -994,7 +994,7 @@ class FedDAREAttack(BaseAttack):
 
         # 动态 LSA 测算计数器
         self.attack_invoke_count = 0
-        self.lsa_recompute_interval = 1  # 每 10 轮重测一次
+        self.lsa_recompute_interval = 10  # 每  轮重测一次
 
     def get_data_type(self) -> str:
         return "image"
@@ -1160,8 +1160,10 @@ class FedDAREAttack(BaseAttack):
             if final_selections[key]:
                 selection_mask[torch.tensor(final_selections[key], device=self.lsa_device)] = 1.0
 
-                # 带有 Gamma 放大的强力组装
-                final_g_layer = selection_mask * (g_p_flat * self.gamma) + (1.0 - selection_mask) * g_b_flat
+            # 🛠️ 修复：向左缩进，移出 if 块！无论是否投毒都必须生成 final_g_layer
+            # 带有 Gamma 放大的强力组装 (若 mask 全为 0，则自动回退为纯良性更新 g_b_flat)
+            final_g_layer = selection_mask * (g_p_flat * self.gamma) + (1.0 - selection_mask) * g_b_flat
+
             p_delta = final_g_layer.reshape(*param_shapes[key]).cpu()
             poisoned_state[key] = (global_model_state[key].float() + p_delta).to(local_model_state[key].dtype)
 
@@ -1194,7 +1196,7 @@ class LayerwisePoisoningAttack(BadNetsAttack):
 
         self.attack_invoke_count = 0
         # 为了加速联邦学习实验，每隔若干轮重新测算一次 BC 层
-        self.lsa_recompute_interval = config.get('lsa_recompute_interval', 1)
+        self.lsa_recompute_interval = config.get('lsa_recompute_interval', 10)
 
     def setup_lsa_environment(self, model: torch.nn.Module, dataloader: Any, device: torch.device):
         """由 client.py 在每轮训练前调用，挂载 LSA 环境"""

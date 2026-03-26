@@ -93,7 +93,7 @@ class FLClient:
         if has_active_attack:
             # 如果是恶意客户端，在此处硬编码或从配置读取倍率
             # 建议设置为 5 或者 epochs * 2.5
-            epochs_to_run = 2
+            epochs_to_run = 6
             print(f"   [🔥 Attack Boost] Client {self.client_id} is attacking, boosting local epochs to {epochs_to_run}")
         else:
             # 良性客户端维持原状
