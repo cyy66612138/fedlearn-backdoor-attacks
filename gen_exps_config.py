@@ -784,7 +784,12 @@ List[str]:
     # alpha_non_iid_list = [0.1, 0.2, 1.0, 5.0, 10.0]
     # start_rounds = [400] # 500 0
     start_rounds = [0]  # 500 0
-    num_rounds_training = [100]  # 600 # 200
+    # num_rounds_training = [60]  # 600 # 200
+    # ✅ 修改点：根据攻击类型动态设置训练轮数
+    if attack_type == 'feddare':
+        num_rounds_training = [100]
+    else:
+        num_rounds_training = [60]
     optimizers = ["Adam", "SGD"]
     check_optim_dataset = {
         "SGD": ['mnist', 'fashionmnist'],
@@ -877,7 +882,8 @@ List[str]:
                                                 for target_label in target_labels:
                                                     config = clone_config(base_config)
 
-                                                    attack_duration = 100  # if start_round == 500 else 200 # 0, 400, 500
+                                                    # attack_duration = 100  # if start_round == 500 else 200 # 0, 400, 500
+                                                    attack_duration = nrd_training
                                                     start_attack_round = start_round
                                                     stop_attack_round = start_attack_round + attack_duration
                                                     set_fl_attack_clients(config, attack_type, num_clients,

@@ -7,7 +7,7 @@ from typing import List, Dict
 # ===================== 通用配置区域（按需修改） =====================
 JSON_DIR = "./results"  # JSON文件根目录（支持子目录）
 OUTPUT_EXCEL = "federated_learning_experiments.xlsx"  # 输出Excel文件名
-TARGET_ROUNDS = [10,20,30,40,50,60,70,80,90, 100]  # 需要提取的训练轮数
+TARGET_ROUNDS = [100]  # 需要提取的训练轮数
 # 定义需要提取的指标（字段名: Excel列名）
 METRICS = {
     "test_accuracy": "测试准确率（%）",
