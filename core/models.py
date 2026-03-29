@@ -14,9 +14,18 @@ def create_model_from_dataset_config(config: Dict[str, Any]) -> nn.Module:
     num_classes = config['dataset']['num_classes']
     # mnist: (1, 28, 28), cifar10: (3, 32, 32), tinyimagenet: (3, 64, 64)
 
-    if model_name in ['resnet18', 'simplecnn']:
+    # if model_name in ['resnet18', 'simplecnn']:
+    #     from core.custom_models import get_model as get_custom_model
+    #     # print(f"Creating custom model: {model_name} with input_dim: {num_channels}, num_channels: {num_classes}, input_dim: {input_dim}")
+    #     return get_custom_model(
+    #         model_name=model_name,
+    #         num_channels=num_channels,
+    #         num_classes=num_classes,
+    #         num_dims=input_dim,
+    #         device=None,
+    #     )
+    if model_name in ['resnet18', 'simplecnn', 'vgg19']:
         from core.custom_models import get_model as get_custom_model
-        # print(f"Creating custom model: {model_name} with input_dim: {num_channels}, num_channels: {num_classes}, input_dim: {input_dim}")
         return get_custom_model(
             model_name=model_name,
             num_channels=num_channels,

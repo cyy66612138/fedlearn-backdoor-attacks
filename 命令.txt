@@ -13,19 +13,15 @@ ps -u root -f | grep python
 grep -oP "python -u run_federated\.py --config \S+ --gpu \d+" commands-v3.txt > tasks.txt
 
 python tmux_queue.py
-tmux attach -t EXP_QUEUE
-
-python tmux_queue_dynamic.py
 tmux attach -t EXP_QUEUE_DYNAMIC
-# 查看已完成多少个
-ls dynamic_completed/*.done 2>/dev/null | wc -l
-# 查看还有多少个待执行
-ls dynamic_tasks/ 2>/dev/null | wc -l
 
-python gen_exps_config.py --attack  dba blended sinusoidal threedfed modelreplacement badnets feddare layerwisepoisoning cerp fcba darkfed  --output configs/exp4 --dataset cifar10 --aggregation FedAvg Bucketing CRFL DeepSight FLARE FLDetector FLTrust NormClipping RLR SCAFFOLD SimpleClustering WeakDP  --base configs/base.yaml
+
+python gen_exps_config.py --attack  dba blended sinusoidal threedfed modelreplacement badnets feddare layerwisepoisoning cerp fcba darkfed  --output configs/exp5 --dataset cifar10 --aggregation FedAvg Bucketing CRFL DeepSight FLARE FLDetector FLTrust NormClipping RLR SCAFFOLD SimpleClustering WeakDP  --base configs/base.yaml
 
 dba blended sinusoidal labelflipping edgecase threedfed modelreplacement neurotoxin
 badnets feddare layerwisepoisoning minmax trim krum cerp a3fl fcba iba darkfed
+
+python gen_exps_config.py --attack feddare  --output configs/exp4 --dataset cifar100 --aggregation FedAvg  --base configs/base.yaml
 
 
 dba blended sinusoidal threedfed modelreplacement badnets feddare layerwisepoisoning cerp fcba darkfed
@@ -40,3 +36,8 @@ MultiMetric DnC FLARE LASA Bucketing AUROR SignGuard Mean
 baseline:FedAvg MultiKrum FLTrust Flame MultiMetric DnC RLR FLARE
 
 FedAvg Bucketing CRFL DeepSight FLARE FLDetector FLTrust NormClipping RLR SCAFFOLD SimpleClustering WeakDP
+
+
+python run_federated.py \
+  --config ./configs/clean_base_cifar10.yaml \
+  --gpu 0

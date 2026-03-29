@@ -785,11 +785,12 @@ List[str]:
     # start_rounds = [400] # 500 0
     start_rounds = [0]  # 500 0
     # num_rounds_training = [60]  # 600 # 200
+
     # ✅ 修改点：根据攻击类型动态设置训练轮数
     if attack_type == 'feddare':
         num_rounds_training = [100]
     else:
-        num_rounds_training = [60]
+        num_rounds_training = [100]
     optimizers = ["Adam", "SGD"]
     check_optim_dataset = {
         "SGD": ['mnist', 'fashionmnist'],
@@ -798,6 +799,8 @@ List[str]:
     # BASE_CHECKPOINT_PAHTH = "./checkpoints/base/base_mnist_simplecnn_rnds_2000_opt_SGD__round_400.pth"
     datasets_name = ['mnist', 'fashionmnist', 'cifar10', 'cifar100', 'tinyimagenet', 'gtsrb', 'svhn']
     models_name = ['simplecnn', 'simplecnn', 'resnet18', 'resnet18', 'resnet18', 'resnet18', 'resnet18']
+    # models_name = ['simplecnn', 'simplecnn', 'vgg19', 'resnet18', 'resnet18', 'resnet18', 'resnet18']
+
     opt_name = ['SGD', 'Adam']
     # 'yaml': './configs/generated/base/base_svhn_resnet18_rnds_2000_opt_Adam.yaml',
     custom_models = {}
@@ -810,6 +813,10 @@ List[str]:
                 # custom_models[dataset][model][500] = f"./checkpoints/base/base_{dataset}_{model}_rnds_2000_opt_{opt}__round_500.pth"
                 # custom_models[dataset][model][0] = ""
                 custom_models[dataset][model][0] = "./checkpoints/clean_base/clean_base_cifar10_resnet18__round_300.pth"
+                # custom_models[dataset][model][0] = "./checkpoints/clean_base/clean_base_cifar100_resnet18__round_1000.pth"
+                # custom_models[dataset][model][0] = "./checkpoints/clean_base/clean_base_cifar10_vgg19__round_1000.pth"
+
+
                 custom_models[dataset][model][
                     'yaml'] = f"./configs/generated/base/base_{dataset}_{model}_rnds_2000_opt_{opt}.yaml"
 

@@ -1,6 +1,6 @@
 experiment:
-  name: clean_base_cifar10_vgg
-  description: "Pre-training a clean global model on CIFAR-10 as a base for future attacks."
+  name: clean_base_cifar100_resnet18
+  description: "Pre-training a clean global model on CIFAR-100 as a base for future attacks."
   seed: 42
   debug: false
   tags:
@@ -12,18 +12,18 @@ gpu:
   id: 0
 
 dataset:
-  name: cifar10
+  name: cifar100
   type: image
   data_root: ./data
   partition_type: non_iid
   alpha: 0.5
   num_classes: 10
-  mean: [0.4914, 0.4822, 0.4465]
-  std: [0.247, 0.2435, 0.2616]
+  mean: [0.5071, 0.4865, 0.4409]
+  std: [0.2673, 0.2564, 0.2762]
   data_shape: [3, 32, 32]
 
 model:
-  name: vgg
+  name: resnet18
   weights: ''             # 留空，代表从头开始随机初始化
   resume_training: false
 

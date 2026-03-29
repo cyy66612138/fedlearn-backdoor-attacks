@@ -24,7 +24,7 @@ def get_model(model_name, num_channels=3, num_classes=10, num_dims=32, device=No
         # Original ResNet models
         "resnet18", "resnet34", "resnet50", "resnet101", "resnet152",
         # # VGG models
-        # "vgg11", "vgg13", "vgg16", "vgg19"
+        "vgg11", "vgg13", "vgg16", "vgg19"
     }
 
     if name in grey_only:
@@ -54,3 +54,4 @@ def get_model(model_name, num_channels=3, num_classes=10, num_dims=32, device=No
 from . import lenet  # noqa: F401
 from . import simplecnn  # noqa: F401
 from . import resnet  # noqa: F401
+from . import vgg  # <--- 手动加上这一行！
