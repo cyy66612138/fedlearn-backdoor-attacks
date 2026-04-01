@@ -796,6 +796,10 @@ List[str]:
         "SGD": ['mnist', 'fashionmnist'],
         "Adam": ['cifar10', 'cifar100', 'svhn', 'tinyimagenet', 'gtsrb']
     }
+    # check_optim_dataset = {
+    #     "SGD": ['cifar10','mnist', 'fashionmnist'],
+    #     "Adam": [ 'cifar100', 'svhn', 'tinyimagenet', 'gtsrb']
+    # }
     # BASE_CHECKPOINT_PAHTH = "./checkpoints/base/base_mnist_simplecnn_rnds_2000_opt_SGD__round_400.pth"
     datasets_name = ['mnist', 'fashionmnist', 'cifar10', 'cifar100', 'tinyimagenet', 'gtsrb', 'svhn']
     models_name = ['simplecnn', 'simplecnn', 'resnet18', 'resnet18', 'resnet18', 'resnet18', 'resnet18']
