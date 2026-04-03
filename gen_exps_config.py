@@ -529,23 +529,73 @@ def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, tar
     #         'poison_ratio': 0.5,
     #         'apply_to_client_ids': id_adversarial_clients,
     #     })
+    # elif attack_type.lower() == "feddare":
+    #     config['client_attacks'].append({
+    #         'name': 'FedDAREAttack',
+    #         'target_class': target_label,
+    #
+    #         # 【方案一核心】
+    #         'drop_rate': 0.8,
+    #         # 【方案一核心：人为放大】
+    #         'gamma': 5,
+    #
+    #         # 'alpha': 0.5,  # 如果发现 Flame 还是拦了，直接狠一点把 alpha 调成 0.3 或 0.1
+    #
+    #         'trigger_height': default_size,
+    #         'trigger_width': default_size,
+    #         'poison_ratio': 0.5,
+    #         'apply_to_client_ids': id_adversarial_clients,
+    #     })
     elif attack_type.lower() == "feddare":
         config['client_attacks'].append({
             'name': 'FedDAREAttack',
             'target_class': target_label,
-
-            # 【方案一核心】
-            'drop_rate': 0.8,
-            # 【方案一核心：人为放大】
-            'gamma': 5,
-
-            # 'alpha': 0.5,  # 如果发现 Flame 还是拦了，直接狠一点把 alpha 调成 0.3 或 0.1
-
+            'drop_rate': 0.99,  # 建议用您主实验的最佳参数 0.99
+            'gamma': 100,  # 建议用您主实验的最佳参数 50
+            'ablation_mode': 'none',  # 完整版，不开启消融
             'trigger_height': default_size,
             'trigger_width': default_size,
             'poison_ratio': 0.5,
             'apply_to_client_ids': id_adversarial_clients,
         })
+        # ================= 新增：FedDARE 消融实验分支 =================
+    elif attack_type.lower() == "feddare_no_sign":
+        config['client_attacks'].append({
+            'name': 'FedDARE_no_sign',  # 👈 名字已正式修改！
+            'target_class': target_label,
+            'drop_rate': 0.8,
+            'gamma': 5,
+            'ablation_mode': 'no_sign',
+            'trigger_height': default_size,
+            'trigger_width': default_size,
+            'poison_ratio': 0.5,
+            'apply_to_client_ids': id_adversarial_clients,
+        })
+    elif attack_type.lower() == "feddare_no_lsa":
+        config['client_attacks'].append({
+            'name': 'FedDARE_no_lsa',  # 👈 名字已正式修改！
+            'target_class': target_label,
+            'drop_rate': 0.8,
+            'gamma': 5,
+            'ablation_mode': 'no_lsa',
+            'trigger_height': default_size,
+            'trigger_width': default_size,
+            'poison_ratio': 0.5,
+            'apply_to_client_ids': id_adversarial_clients,
+        })
+    elif attack_type.lower() == "feddare_no_proj":
+        config['client_attacks'].append({
+            'name': 'FedDARE_no_proj',  # 👈 名字已正式修改！
+            'target_class': target_label,
+            'drop_rate': 0.8,
+            'gamma': 5,
+            'ablation_mode': 'no_proj',
+            'trigger_height': default_size,
+            'trigger_width': default_size,
+            'poison_ratio': 0.5,
+            'apply_to_client_ids': id_adversarial_clients,
+        })
+    # ==============================================================
     elif attack_type.lower() == "modelreplacement":
         config['client_attacks'].append({
             'name': 'ModelReplacementAttack',
@@ -936,10 +986,17 @@ def main() -> None:
     #                              'modelreplacement', 'threedfed', 'edgecase', 'labelflipping', 'layerwisepoisoning'],
     #                     required=True,
     #                     help='Which attack(s) to generate (can specify multiple)')
+    # parser.add_argument('--attack', nargs='+',
+    #                     choices=['base', 'sinusoidal', 'badnets', 'blended', 'dba', 'neurotoxin', 'feddare',
+    #                              'modelreplacement', 'threedfed', 'edgecase', 'labelflipping', 'layerwisepoisoning',
+    #                              'minmax', 'trim', 'krum', 'cerp', 'a3fl', 'fcba', 'iba','darkfed'],  # 这里是新增的7种攻击
+    #                     required=True,
+    #                     help='Which attack(s) to generate (can specify multiple)')
     parser.add_argument('--attack', nargs='+',
                         choices=['base', 'sinusoidal', 'badnets', 'blended', 'dba', 'neurotoxin', 'feddare',
+                                 'feddare_no_sign', 'feddare_no_lsa', 'feddare_no_proj',  # <-- 新增这三个选项
                                  'modelreplacement', 'threedfed', 'edgecase', 'labelflipping', 'layerwisepoisoning',
-                                 'minmax', 'trim', 'krum', 'cerp', 'a3fl', 'fcba', 'iba','darkfed'],  # 这里是新增的7种攻击
+                                 'minmax', 'trim', 'krum', 'cerp', 'a3fl', 'fcba', 'iba', 'darkfed'],
                         required=True,
                         help='Which attack(s) to generate (can specify multiple)')
     parser.add_argument('--output', default='configs/generated-v3', help='Output directory')

@@ -23,13 +23,12 @@ PERCENTAGE_METRICS = ["test_accuracy", "backdoor_accuracy_0"]
 
 def parse_experiment_config(filename: str) -> Dict[str, str]:
     """
-    通用文件名解析函数，从文件名提取攻击类型、防御方法
-    适配文件名格式：{attack}_{dataset}_{model}_..._agg_{defense}_opt_{optimizer}.json
+    通用文件名解析函数，从文件名提取兜底的攻击类型和防御/聚合方法
     """
     parts = filename.split("_")
     config = {}
 
-    # 1. 提取攻击类型（文件名第一部分）
+    # 1. 提取默认攻击类型（兜底用，后续会被 JSON 内部的真实 name 覆盖）
     config["攻击类型"] = parts[0]
 
     # 2. 提取防御/聚合方法（在"_agg_"和"_opt_"之间）
@@ -40,15 +39,11 @@ def parse_experiment_config(filename: str) -> Dict[str, str]:
     except (ValueError, IndexError):
         config["防御/聚合方法"] = "未知方法"
 
-    # 3. 可选：提取数据集、模型（如需补充可扩展）
-    # config["数据集"] = parts[1]
-    # config["模型"] = parts[2]
-
     return config
 
 
 def extract_data_from_json(json_path: str) -> List[Dict]:
-    """从单个JSON文件提取目标轮次的所有指标"""
+    """从单个JSON文件提取目标轮次的所有指标，并解析真实的攻击类型"""
     filename = os.path.basename(json_path)
     experiment_config = parse_experiment_config(filename)
 
@@ -58,6 +53,23 @@ def extract_data_from_json(json_path: str) -> List[Dict]:
     except Exception as e:
         print(f"⚠️  读取文件失败 {filename}: {str(e)}")
         return []
+
+    # ================= 新增核心逻辑：从 JSON 内部直接提取真实攻击名称 =================
+    try:
+        # 获取 json 中的 config -> client_attacks 列表
+        client_attacks = data.get("config", {}).get("client_attacks", [])
+        if client_attacks and len(client_attacks) > 0:
+            attack_name = client_attacks[0].get("name")
+            if attack_name:
+                # 覆盖文件命中解析出的兜底名称
+                experiment_config["攻击类型"] = attack_name
+        else:
+            # 如果 client_attacks 为空（比如无攻击的 Clean Base 训练），
+            # 就在这里手动标记为 Base，或者保留文件名解析出的名称
+            pass
+    except Exception as e:
+        pass
+    # ==============================================================================
 
     round_data = []
     if "training_history" not in data:

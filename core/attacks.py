@@ -1182,13 +1182,280 @@ from typing import Dict, Any
 # 注意：请确保文件顶部已经导入了所需的基础库，并且继承了 BaseAttack
 # class BaseAttack(...) 等定义保持不变
 
+# class FedDAREAttack(BaseAttack):
+#     def __init__(self, config: Dict[str, Any]):
+#         super().__init__(config)
+#         self.target_class = config.get('target_class', 0)
+#         # 严格执行全局 1% 预算 (drop_rate 0.99 意味着抛弃 99%，只保留 1%)
+#         self.drop_rate = config.get('drop_rate', 0.99)
+#         # 恢复 Gamma 放大，用于突破服务器聚合时的稀释效应
+#         self.gamma = config.get('gamma', 50.0)
+#
+#         input_dim = config.get('input_dim', 32)
+#         default_size = 5 if input_dim >= 32 else 4
+#         self.trigger_height = config.get('trigger_height', default_size)
+#         self.trigger_width = config.get('trigger_width', default_size)
+#
+#         # 缓存与 LSA 环境参数
+#         self.lsa_model = None
+#         self.lsa_dataloader = None
+#         self.lsa_device = None
+#         self.cached_layer_scores = None
+#         self.cached_score_sum = None
+#
+#         # 动态 LSA 测算计数器
+#         self.attack_invoke_count = 0
+#         self.lsa_recompute_interval = 10  # 每 10 轮重测一次关键层，节省算力
+#
+#     def get_data_type(self) -> str:
+#         return "image"
+#
+#     def setup_lsa_environment(self, model: torch.nn.Module, dataloader: Any, device: torch.device):
+#         """挂载 LSA 测试环境，用于动态计算层级后门敏感度"""
+#         self.lsa_model = model
+#         self.lsa_dataloader = dataloader
+#         self.lsa_device = device
+#
+#     def _apply_static_trigger(self, poisoned_data: torch.Tensor, poisoned_labels: torch.Tensor,
+#                               poison_indices: torch.Tensor) -> None:
+#         """在图片右下角打上 5x5 的纯白 Trigger"""
+#         _, h, w = poisoned_data.shape[1], poisoned_data.shape[2], poisoned_data.shape[3]
+#         row_start, row_end = h - self.trigger_height, h
+#         col_start, col_end = w - self.trigger_width, w
+#         # 将 trigger 区域设置为最大值 (标准化前通常对应白色)
+#         poisoned_data[poison_indices, :, row_start:row_end, col_start:col_end] = torch.max(poisoned_data)
+#         poisoned_labels[poison_indices] = self.target_class
+#
+#     def _evaluate_bsr(self, eval_model: torch.nn.Module) -> float:
+#         """内部评估函数：测试当前模型权重的真实后门成功率 (BSR)"""
+#         eval_model.eval()
+#         correct = 0
+#         total = 0
+#         with torch.no_grad():
+#             for data, target in self.lsa_dataloader:
+#                 data, target = data.to(self.lsa_device), target.to(self.lsa_device)
+#
+#                 # 只测试原本不是 target_class 的样本
+#                 mask = (target != self.target_class)
+#                 if not mask.any(): continue
+#                 data = data[mask]
+#
+#                 poisoned_data = data.clone()
+#                 poison_indices = torch.arange(data.shape[0])
+#                 # 先反标准化，打上 trigger，再标准化回去
+#                 poisoned_data = self._denormalize(poisoned_data)
+#                 dummy_labels = torch.zeros(data.shape[0], dtype=torch.long, device=self.lsa_device)
+#                 self._apply_static_trigger(poisoned_data, dummy_labels, poison_indices)
+#                 poisoned_data = self._normalize(poisoned_data)
+#
+#                 outputs = eval_model(poisoned_data)
+#                 _, predicted = torch.max(outputs.data, 1)
+#                 total += data.size(0)
+#                 correct += (predicted == self.target_class).sum().item()
+#
+#         return correct / total if total > 0 else 0.0
+#
+#     def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
+#                               global_model_state: Dict[str, torch.Tensor],
+#                               benign_model_state: Dict[str, torch.Tensor] = None,
+#                               algorithm: str = "FedAvg") -> Dict[str, torch.Tensor]:
+#         if benign_model_state is None:
+#             raise ValueError("Sign-Aligned BC-DARE 必须依赖 benign_model_state 进行符号对齐与基准测算！")
+#
+#         G_poison = {}
+#         G_benign = {}
+#         param_shapes = {}
+#         total_params = 0
+#
+#         # 计算增量梯度 (Delta W)
+#         for key in local_model_state.keys():
+#             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
+#                 continue
+#             G_poison[key] = local_model_state[key].float() - global_model_state[key].float()
+#             G_benign[key] = benign_model_state[key].float() - global_model_state[key].float()
+#             param_shapes[key] = G_poison[key].shape
+#             total_params += G_poison[key].numel()
+#
+#             # =====================================================================
+#             # 🌟 新增埋点代码：记录未经放大的恶意梯度与良性梯度的 L2 范数
+#             # =====================================================================
+#             import math
+#             import os
+#
+#             norm_poison_sq = sum(torch.sum(G_poison[k] ** 2).item() for k in G_poison)
+#             norm_benign_sq = sum(torch.sum(G_benign[k] ** 2).item() for k in G_benign)
+#             norm_p = math.sqrt(norm_poison_sq)
+#             norm_b = math.sqrt(norm_benign_sq)
+#
+#             # 将数据追加写入 CSV 文件中，方便后续画图
+#             log_file = "gradient_norms_empirical_proof.csv"
+#             if not os.path.exists(log_file):
+#                 with open(log_file, "w") as f:
+#                     f.write("Round,Poison_Norm,Benign_Norm\n")
+#
+#             with open(log_file, "a") as f:
+#                 f.write(f"{self.attack_invoke_count},{norm_p:.6f},{norm_b:.6f}\n")
+#
+#         # =========================================================================
+#         # 第一阶段：层级敏感度分析 (Layer-wise Sensitivity Analysis)
+#         # =========================================================================
+#         force_recompute = (self.attack_invoke_count % self.lsa_recompute_interval == 0)
+#
+#         if self.cached_layer_scores is None or force_recompute:
+#             print(f"\n   [Sign-Aligned BC-DARE] {'首次' if not force_recompute else '周期性'}执行严格 LSA 打分...")
+#             layer_scores = {}
+#             score_sum = 0.0
+#             self.lsa_model = self.lsa_model.to(self.lsa_device)
+#
+#             # 测试纯毒模型的基准 BSR
+#             self.lsa_model.load_state_dict(local_model_state)
+#             bsr_malicious = self._evaluate_bsr(self.lsa_model)
+#
+#             for key in G_poison.keys():
+#                 # 逐层替换为良性参数
+#                 hybrid_state = {k: v.clone() for k, v in local_model_state.items()}
+#                 hybrid_state[key] = benign_model_state[key].clone()
+#                 self.lsa_model.load_state_dict(hybrid_state)
+#                 bsr_hybrid = self._evaluate_bsr(self.lsa_model)
+#
+#                 # 计算杀伤力下降幅度
+#                 delta_bsr = bsr_malicious - bsr_hybrid
+#                 # 严格非负：使用微小 epsilon (1e-9) 确保即使是 0 分层也有极小的入选几率，防止死锁
+#                 score = max(1e-9, delta_bsr)
+#                 layer_scores[key] = score
+#                 score_sum += score
+#
+#             self.cached_layer_scores = layer_scores
+#             self.cached_score_sum = score_sum
+#             self.lsa_model = self.lsa_model.cpu()
+#         else:
+#             layer_scores = self.cached_layer_scores
+#             score_sum = self.cached_score_sum
+#
+#         # =========================================================================
+#         # 第二阶段：符号对齐 (Sign-Alignment) 与 水箱分配 (Water-filling)
+#         # =========================================================================
+#         global_budget = int(total_params * (1.0 - self.drop_rate))
+#         remaining_budget = global_budget
+#
+#         layer_candidates = {}
+#         for key in G_poison.keys():
+#             g_p_flat = G_poison[key].flatten().to(self.lsa_device)
+#             g_b_flat = G_benign[key].flatten().to(self.lsa_device)
+#
+#             # 核心防御绕过：仅保留符号与良性更新严格一致的参数维度
+#             sign_mask = (torch.sign(g_p_flat) == torch.sign(g_b_flat))
+#             candidate_indices = torch.where(sign_mask)[0]
+#
+#             if len(candidate_indices) > 0:
+#                 epsilon = 1e-8
+#                 # 计算显著性：恶意的扰动有多强
+#                 saliency = (torch.abs(g_p_flat[candidate_indices]) / (torch.abs(g_b_flat[candidate_indices]) + epsilon))
+#                 sorted_inner = torch.argsort(saliency, descending=True)
+#                 layer_candidates[key] = candidate_indices[sorted_inner].tolist()
+#             else:
+#                 layer_candidates[key] = []
+#
+#         # 迭代式分配预算
+#         final_selections = {key: [] for key in G_poison.keys()}
+#         active_layers = [k for k in layer_scores.keys() if len(layer_candidates[k]) > 0]
+#
+#         while remaining_budget > 0 and len(active_layers) > 0:
+#             current_total_score = sum(layer_scores[k] for k in active_layers)
+#             layers_to_remove = []
+#             budget_to_distribute = remaining_budget
+#
+#             for key in active_layers:
+#                 # 按照 LSA 得分比例分配名额
+#                 allocation = int(math.floor(budget_to_distribute * (layer_scores[key] / current_total_score)))
+#                 if allocation == 0 and remaining_budget > 0: allocation = 1
+#
+#                 take = min(allocation, len(layer_candidates[key]), remaining_budget)
+#
+#                 if take > 0:
+#                     final_selections[key].extend(layer_candidates[key][:take])
+#                     layer_candidates[key] = layer_candidates[key][take:]
+#                     remaining_budget -= take
+#
+#                 if len(layer_candidates[key]) == 0:
+#                     layers_to_remove.append(key)
+#                 if remaining_budget <= 0: break
+#
+#             for k in layers_to_remove: active_layers.remove(k)
+#
+#         # =========================================================================
+#         # 第三阶段：Gamma 能量重组
+#         # =========================================================================
+#         poisoned_state = {}
+#         for key in local_model_state.keys():
+#             if key not in G_poison:
+#                 poisoned_state[key] = benign_model_state[key].clone()
+#                 continue
+#
+#             g_p_flat = G_poison[key].flatten().to(self.lsa_device)
+#             g_b_flat = G_benign[key].flatten().to(self.lsa_device)
+#
+#             selection_mask = torch.zeros_like(g_p_flat)
+#             if final_selections[key]:
+#                 selection_mask[torch.tensor(final_selections[key], device=self.lsa_device)] = 1.0
+#
+#             # 核心融合：被选中的 1% 放大 Gamma 倍，剩下的 99% 使用良性参数掩盖
+#             final_g_layer = selection_mask * (g_p_flat * self.gamma) + (1.0 - selection_mask) * g_b_flat
+#
+#             p_delta = final_g_layer.reshape(*param_shapes[key]).cpu()
+#             poisoned_state[key] = (global_model_state[key].float() + p_delta).to(local_model_state[key].dtype)
+#
+#         used_total = global_budget - remaining_budget
+#         print(
+#             f"   [Sign-Aligned BC-DARE] 预算利用率: {(used_total / global_budget) * 100:.2f}% (Gamma 放大: {self.gamma}x)")
+#
+#         # =========================================================================
+#         # 第四阶段：全局范数投影 (Global Norm Projection / PGD 核心)
+#         # 数学闭环：计算并施加投影因子 ρ，严格控制全局 L2 范数，绕过 NormClipping
+#         # =========================================================================
+#         total_norm_crafted_sq = 0.0
+#         total_norm_benign_sq = 0.0
+#
+#         # 1. 遍历所有层，计算整体攻击梯度与良性梯度的 L2 范数的平方和
+#         for key in G_poison.keys():
+#             g_c = poisoned_state[key].float() - global_model_state[key].float()
+#             g_b = benign_model_state[key].float() - global_model_state[key].float()
+#
+#             total_norm_crafted_sq += torch.sum(g_c ** 2).item()
+#             total_norm_benign_sq += torch.sum(g_b ** 2).item()
+#
+#         norm_crafted = math.sqrt(total_norm_crafted_sq)
+#         norm_benign = math.sqrt(total_norm_benign_sq)
+#
+#         # 2. 如果攻击范数超标，则计算投影因子 ρ 进行等比例压缩
+#         if norm_crafted > norm_benign and norm_crafted > 1e-9:
+#             rho = norm_benign / norm_crafted  # 这就是您数学推导中的 ρ
+#             print(
+#                 f"   [PGD 投影触发] 恶意范数 {norm_crafted:.4f} > 良性范数 {norm_benign:.4f} | 投影因子 ρ = {rho:.4f}")
+#
+#             for key in G_poison.keys():
+#                 g_c = poisoned_state[key].float() - global_model_state[key].float()
+#                 # 施加等比例投影缩放
+#                 projected_delta = g_c * rho
+#                 # 写回最终模型状态
+#                 poisoned_state[key] = (global_model_state[key].float() + projected_delta).to(
+#                     local_model_state[key].dtype)
+#         else:
+#             print(f"   [PGD 投影未触发] 恶意范数 {norm_crafted:.4f} 安全 (<= {norm_benign:.4f})")
+#
+#         self.attack_invoke_count += 1
+#         return poisoned_state
+
+
+# =========================================================================
+# 🚀 终极破防框架：Sign-Aligned BC-DARE (全量同向渗透 + 策略A截断)
+# 包含三大消融实验控制开关：'no_sign', 'no_lsa', 'no_proj'
+# =========================================================================
 class FedDAREAttack(BaseAttack):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
         self.target_class = config.get('target_class', 0)
-        # 严格执行全局 1% 预算 (drop_rate 0.99 意味着抛弃 99%，只保留 1%)
         self.drop_rate = config.get('drop_rate', 0.99)
-        # 恢复 Gamma 放大，用于突破服务器聚合时的稀释效应
         self.gamma = config.get('gamma', 50.0)
 
         input_dim = config.get('input_dim', 32)
@@ -1196,63 +1463,53 @@ class FedDAREAttack(BaseAttack):
         self.trigger_height = config.get('trigger_height', default_size)
         self.trigger_width = config.get('trigger_width', default_size)
 
-        # 缓存与 LSA 环境参数
+        # ========== 消融实验开关 (Ablation Switches) ==========
+        # 可选值: 'none', 'no_sign', 'no_lsa', 'no_proj'
+        self.ablation_mode = config.get('ablation_mode', 'none').lower()
+        if self.ablation_mode != 'none':
+            print(f"   [Ablation Warning] FedDARE 正在运行消融模式: {self.ablation_mode.upper()}")
+
         self.lsa_model = None
         self.lsa_dataloader = None
         self.lsa_device = None
         self.cached_layer_scores = None
         self.cached_score_sum = None
 
-        # 动态 LSA 测算计数器
         self.attack_invoke_count = 0
-        self.lsa_recompute_interval = 10  # 每 10 轮重测一次关键层，节省算力
+        self.lsa_recompute_interval = 10
 
     def get_data_type(self) -> str:
         return "image"
 
     def setup_lsa_environment(self, model: torch.nn.Module, dataloader: Any, device: torch.device):
-        """挂载 LSA 测试环境，用于动态计算层级后门敏感度"""
         self.lsa_model = model
         self.lsa_dataloader = dataloader
         self.lsa_device = device
 
     def _apply_static_trigger(self, poisoned_data: torch.Tensor, poisoned_labels: torch.Tensor,
                               poison_indices: torch.Tensor) -> None:
-        """在图片右下角打上 5x5 的纯白 Trigger"""
         _, h, w = poisoned_data.shape[1], poisoned_data.shape[2], poisoned_data.shape[3]
         row_start, row_end = h - self.trigger_height, h
         col_start, col_end = w - self.trigger_width, w
-        # 将 trigger 区域设置为最大值 (标准化前通常对应白色)
-        poisoned_data[poison_indices, :, row_start:row_end, col_start:col_end] = torch.max(poisoned_data)
+        poisoned_data[poison_indices, :, row_start:row_end, col_start:col_end] = 1.0
         poisoned_labels[poison_indices] = self.target_class
 
     def _evaluate_bsr(self, eval_model: torch.nn.Module) -> float:
-        """内部评估函数：测试当前模型权重的真实后门成功率 (BSR)"""
+        correct, total = 0, 0
         eval_model.eval()
-        correct = 0
-        total = 0
         with torch.no_grad():
             for data, target in self.lsa_dataloader:
-                data, target = data.to(self.lsa_device), target.to(self.lsa_device)
-
-                # 只测试原本不是 target_class 的样本
-                mask = (target != self.target_class)
-                if not mask.any(): continue
-                data = data[mask]
-
+                data = data.to(self.lsa_device)
                 poisoned_data = data.clone()
                 poison_indices = torch.arange(data.shape[0])
-                # 先反标准化，打上 trigger，再标准化回去
                 poisoned_data = self._denormalize(poisoned_data)
                 dummy_labels = torch.zeros(data.shape[0], dtype=torch.long, device=self.lsa_device)
                 self._apply_static_trigger(poisoned_data, dummy_labels, poison_indices)
                 poisoned_data = self._normalize(poisoned_data)
-
                 outputs = eval_model(poisoned_data)
                 _, predicted = torch.max(outputs.data, 1)
                 total += data.size(0)
                 correct += (predicted == self.target_class).sum().item()
-
         return correct / total if total > 0 else 0.0
 
     def apply_model_poisoning(self, local_model_state: Dict[str, torch.Tensor],
@@ -1260,14 +1517,13 @@ class FedDAREAttack(BaseAttack):
                               benign_model_state: Dict[str, torch.Tensor] = None,
                               algorithm: str = "FedAvg") -> Dict[str, torch.Tensor]:
         if benign_model_state is None:
-            raise ValueError("Sign-Aligned BC-DARE 必须依赖 benign_model_state 进行符号对齐与基准测算！")
+            raise ValueError("Sign-Aligned BC-DARE 必须依赖 benign_model_state！")
 
         G_poison = {}
         G_benign = {}
         param_shapes = {}
         total_params = 0
 
-        # 计算增量梯度 (Delta W)
         for key in local_model_state.keys():
             if 'num_batches_tracked' in key or 'running_mean' in key or 'running_var' in key:
                 continue
@@ -1276,64 +1532,50 @@ class FedDAREAttack(BaseAttack):
             param_shapes[key] = G_poison[key].shape
             total_params += G_poison[key].numel()
 
-            # =====================================================================
-            # 🌟 新增埋点代码：记录未经放大的恶意梯度与良性梯度的 L2 范数
-            # =====================================================================
-            import math
-            import os
-
-            norm_poison_sq = sum(torch.sum(G_poison[k] ** 2).item() for k in G_poison)
-            norm_benign_sq = sum(torch.sum(G_benign[k] ** 2).item() for k in G_benign)
-            norm_p = math.sqrt(norm_poison_sq)
-            norm_b = math.sqrt(norm_benign_sq)
-
-            # 将数据追加写入 CSV 文件中，方便后续画图
-            log_file = "gradient_norms_empirical_proof.csv"
-            if not os.path.exists(log_file):
-                with open(log_file, "w") as f:
-                    f.write("Round,Poison_Norm,Benign_Norm\n")
-
-            with open(log_file, "a") as f:
-                f.write(f"{self.attack_invoke_count},{norm_p:.6f},{norm_b:.6f}\n")
-
         # =========================================================================
-        # 第一阶段：层级敏感度分析 (Layer-wise Sensitivity Analysis)
+        # 步骤 1：LSA 打分 (含消融逻辑)
         # =========================================================================
         force_recompute = (self.attack_invoke_count % self.lsa_recompute_interval == 0)
 
         if self.cached_layer_scores is None or force_recompute:
-            print(f"\n   [Sign-Aligned BC-DARE] {'首次' if not force_recompute else '周期性'}执行严格 LSA 打分...")
             layer_scores = {}
             score_sum = 0.0
-            self.lsa_model = self.lsa_model.to(self.lsa_device)
 
-            # 测试纯毒模型的基准 BSR
-            self.lsa_model.load_state_dict(local_model_state)
-            bsr_malicious = self._evaluate_bsr(self.lsa_model)
+            # 🛑 消融控制 1：去除 LSA (w/o LSA)
+            if self.ablation_mode == 'no_lsa':
+                print(f"   [Ablation: no_lsa] 跳过动态评估，执行随机层级打分...")
+                for key in G_poison.keys():
+                    # 给所有层分配均匀的基础分数，外加微小随机扰动避免死锁
+                    score = 1.0 + torch.rand(1).item() * 0.1
+                    layer_scores[key] = score
+                    score_sum += score
+            else:
+                # 正常 LSA 流程
+                print(f"\n   [Sign-Aligned BC-DARE] 执行严格 LSA 打分...")
+                self.lsa_model = self.lsa_model.to(self.lsa_device)
+                self.lsa_model.load_state_dict(local_model_state)
+                bsr_malicious = self._evaluate_bsr(self.lsa_model)
 
-            for key in G_poison.keys():
-                # 逐层替换为良性参数
-                hybrid_state = {k: v.clone() for k, v in local_model_state.items()}
-                hybrid_state[key] = benign_model_state[key].clone()
-                self.lsa_model.load_state_dict(hybrid_state)
-                bsr_hybrid = self._evaluate_bsr(self.lsa_model)
+                for key in G_poison.keys():
+                    hybrid_state = {k: v.clone() for k, v in local_model_state.items()}
+                    hybrid_state[key] = benign_model_state[key].clone()
+                    self.lsa_model.load_state_dict(hybrid_state)
+                    bsr_hybrid = self._evaluate_bsr(self.lsa_model)
 
-                # 计算杀伤力下降幅度
-                delta_bsr = bsr_malicious - bsr_hybrid
-                # 严格非负：使用微小 epsilon (1e-9) 确保即使是 0 分层也有极小的入选几率，防止死锁
-                score = max(1e-9, delta_bsr)
-                layer_scores[key] = score
-                score_sum += score
+                    delta_bsr = bsr_malicious - bsr_hybrid
+                    score = max(1e-9, delta_bsr)
+                    layer_scores[key] = score
+                    score_sum += score
+                self.lsa_model = self.lsa_model.cpu()
 
             self.cached_layer_scores = layer_scores
             self.cached_score_sum = score_sum
-            self.lsa_model = self.lsa_model.cpu()
         else:
             layer_scores = self.cached_layer_scores
             score_sum = self.cached_score_sum
 
         # =========================================================================
-        # 第二阶段：符号对齐 (Sign-Alignment) 与 水箱分配 (Water-filling)
+        # 步骤 2：迭代式水箱平衡分配 (含消融逻辑)
         # =========================================================================
         global_budget = int(total_params * (1.0 - self.drop_rate))
         remaining_budget = global_budget
@@ -1343,20 +1585,24 @@ class FedDAREAttack(BaseAttack):
             g_p_flat = G_poison[key].flatten().to(self.lsa_device)
             g_b_flat = G_benign[key].flatten().to(self.lsa_device)
 
-            # 核心防御绕过：仅保留符号与良性更新严格一致的参数维度
-            sign_mask = (torch.sign(g_p_flat) == torch.sign(g_b_flat))
+            # 🛑 消融控制 2：去除符号锁定 (w/o Sign-Alignment)
+            if self.ablation_mode == 'no_sign':
+                # 强制全部置为 True，允许符号冲突的参数入选
+                sign_mask = torch.ones_like(g_p_flat, dtype=torch.bool)
+            else:
+                # 正常的符号对齐约束
+                sign_mask = (torch.sign(g_p_flat) == torch.sign(g_b_flat))
+
             candidate_indices = torch.where(sign_mask)[0]
 
             if len(candidate_indices) > 0:
                 epsilon = 1e-8
-                # 计算显著性：恶意的扰动有多强
                 saliency = (torch.abs(g_p_flat[candidate_indices]) / (torch.abs(g_b_flat[candidate_indices]) + epsilon))
                 sorted_inner = torch.argsort(saliency, descending=True)
                 layer_candidates[key] = candidate_indices[sorted_inner].tolist()
             else:
                 layer_candidates[key] = []
 
-        # 迭代式分配预算
         final_selections = {key: [] for key in G_poison.keys()}
         active_layers = [k for k in layer_scores.keys() if len(layer_candidates[k]) > 0]
 
@@ -1366,10 +1612,8 @@ class FedDAREAttack(BaseAttack):
             budget_to_distribute = remaining_budget
 
             for key in active_layers:
-                # 按照 LSA 得分比例分配名额
                 allocation = int(math.floor(budget_to_distribute * (layer_scores[key] / current_total_score)))
                 if allocation == 0 and remaining_budget > 0: allocation = 1
-
                 take = min(allocation, len(layer_candidates[key]), remaining_budget)
 
                 if take > 0:
@@ -1384,9 +1628,14 @@ class FedDAREAttack(BaseAttack):
             for k in layers_to_remove: active_layers.remove(k)
 
         # =========================================================================
-        # 第三阶段：Gamma 能量重组
+        # 步骤 3：拼装、局部放大与范数投影 (含消融逻辑)
         # =========================================================================
         poisoned_state = {}
+
+        # 3.1 组装混合向量
+        crafted_vectors = {}
+        benign_vectors = {}
+
         for key in local_model_state.keys():
             if key not in G_poison:
                 poisoned_state[key] = benign_model_state[key].clone()
@@ -1399,49 +1648,39 @@ class FedDAREAttack(BaseAttack):
             if final_selections[key]:
                 selection_mask[torch.tensor(final_selections[key], device=self.lsa_device)] = 1.0
 
-            # 核心融合：被选中的 1% 放大 Gamma 倍，剩下的 99% 使用良性参数掩盖
+            # 混合更新
             final_g_layer = selection_mask * (g_p_flat * self.gamma) + (1.0 - selection_mask) * g_b_flat
 
-            p_delta = final_g_layer.reshape(*param_shapes[key]).cpu()
+            crafted_vectors[key] = final_g_layer
+            benign_vectors[key] = g_b_flat
+
+        # 3.2 计算全局范数并获取投影因子 rho
+        flat_crafted = torch.cat([v.flatten() for v in crafted_vectors.values()])
+        flat_benign = torch.cat([v.flatten() for v in benign_vectors.values()])
+
+        norm_crafted = torch.norm(flat_crafted, p=2)
+        norm_benign = torch.norm(flat_benign, p=2)
+
+        # 🛑 消融控制 3：去除范数投影 (w/o Projection)
+        if self.ablation_mode == 'no_proj':
+            rho = 1.0
+            print(f"   [Ablation: no_proj] 跳过隐身投影，当前爆炸范数: {norm_crafted:.2f} (良性基准: {norm_benign:.2f})")
+        else:
+            rho = min(1.0, (norm_benign / (norm_crafted + 1e-9)).item())
+
+        # 3.3 执行缩放并写入模型
+        for key in local_model_state.keys():
+            if key not in G_poison:
+                continue
+
+            # 应用隐身投影因子 rho
+            projected_layer = crafted_vectors[key] * rho
+            p_delta = projected_layer.reshape(*param_shapes[key]).cpu()
             poisoned_state[key] = (global_model_state[key].float() + p_delta).to(local_model_state[key].dtype)
 
         used_total = global_budget - remaining_budget
         print(
-            f"   [Sign-Aligned BC-DARE] 预算利用率: {(used_total / global_budget) * 100:.2f}% (Gamma 放大: {self.gamma}x)")
-
-        # =========================================================================
-        # 第四阶段：全局范数投影 (Global Norm Projection / PGD 核心)
-        # 数学闭环：计算并施加投影因子 ρ，严格控制全局 L2 范数，绕过 NormClipping
-        # =========================================================================
-        total_norm_crafted_sq = 0.0
-        total_norm_benign_sq = 0.0
-
-        # 1. 遍历所有层，计算整体攻击梯度与良性梯度的 L2 范数的平方和
-        for key in G_poison.keys():
-            g_c = poisoned_state[key].float() - global_model_state[key].float()
-            g_b = benign_model_state[key].float() - global_model_state[key].float()
-
-            total_norm_crafted_sq += torch.sum(g_c ** 2).item()
-            total_norm_benign_sq += torch.sum(g_b ** 2).item()
-
-        norm_crafted = math.sqrt(total_norm_crafted_sq)
-        norm_benign = math.sqrt(total_norm_benign_sq)
-
-        # 2. 如果攻击范数超标，则计算投影因子 ρ 进行等比例压缩
-        if norm_crafted > norm_benign and norm_crafted > 1e-9:
-            rho = norm_benign / norm_crafted  # 这就是您数学推导中的 ρ
-            print(
-                f"   [PGD 投影触发] 恶意范数 {norm_crafted:.4f} > 良性范数 {norm_benign:.4f} | 投影因子 ρ = {rho:.4f}")
-
-            for key in G_poison.keys():
-                g_c = poisoned_state[key].float() - global_model_state[key].float()
-                # 施加等比例投影缩放
-                projected_delta = g_c * rho
-                # 写回最终模型状态
-                poisoned_state[key] = (global_model_state[key].float() + projected_delta).to(
-                    local_model_state[key].dtype)
-        else:
-            print(f"   [PGD 投影未触发] 恶意范数 {norm_crafted:.4f} 安全 (<= {norm_benign:.4f})")
+            f"   [Sign-Aligned BC-DARE] 预算利用率: {(used_total / global_budget) * 100:.2f}% (投影因子 rho = {rho:.4f})\n")
 
         self.attack_invoke_count += 1
         return poisoned_state
@@ -2240,8 +2479,12 @@ def create_attack(attack_config: Dict[str, Any]) -> BaseAttack:
         return EdgeCaseBackdoorAttack(attack_config)
     elif attack_name == 'ThreeDFedAttack':
         return ThreeDFedAttack(attack_config)
-    elif attack_name == 'FedDAREAttack':
+    # elif attack_name == 'FedDAREAttack':
+    #     return FedDAREAttack(attack_config)
+    # 👇👇👇 修改这里：把 == 'FedDAREAttack' 改成 startswith('FedDARE')
+    elif attack_name.startswith('FedDARE'):
         return FedDAREAttack(attack_config)
+    # 👆👆👆
     elif attack_name == 'LayerwisePoisoningAttack':
         return LayerwisePoisoningAttack(attack_config)
     elif attack_name in ['MinMaxAttack', 'TrimAttack', 'KrumAttack']:
