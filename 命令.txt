@@ -16,7 +16,8 @@ python tmux_queue.py
 tmux attach -t EXP_QUEUE_DYNAMIC
 
 python result_excel.py
-
+python result_excel_gama_p.py
+python result_excel_alpha.py
 
 python gen_exps_config.py --attack  dba blended sinusoidal threedfed modelreplacement badnets feddare layerwisepoisoning cerp fcba darkfed  --output configs/exp5 --dataset cifar10 --aggregation FedAvg Bucketing CRFL DeepSight FLARE FLDetector FLTrust NormClipping RLR SCAFFOLD SimpleClustering WeakDP  --base configs/base.yaml
 
@@ -24,7 +25,7 @@ dba blended sinusoidal labelflipping edgecase threedfed modelreplacement neuroto
 badnets feddare layerwisepoisoning minmax trim krum cerp a3fl fcba iba darkfed
 feddare_no_sign  feddare_no_lsa  feddare_no_proj
 
-python gen_exps_config.py --attack feddare --output configs/exp8/0.99_100 --dataset cifar10 --aggregation FedAvg Bucketing CRFL DeepSight FLARE FLDetector FLTrust NormClipping RLR SCAFFOLD SimpleClustering WeakDP --base configs/base.yaml
+python gen_exps_config.py --attack dba blended sinusoidal threedfed modelreplacement badnets feddare layerwisepoisoning cerp fcba darkfed --output configs/exp10 --dataset cifar10 --aggregation FedAvg --base configs/base.yaml
 
 
 dba blended sinusoidal threedfed modelreplacement badnets feddare layerwisepoisoning cerp fcba darkfed

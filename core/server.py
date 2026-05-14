@@ -65,6 +65,54 @@ class FLServer:
         if not client_results:
             return self.global_model
 
+        # =====================================================================
+        # [实验 3.1] 特征提取探针：截取第 50 轮客户端最后一层更新 (Delta W)
+        # =====================================================================
+        TARGET_ROUND = 50
+        if round_num == TARGET_ROUND:
+            import os
+            import torch
+            import numpy as np
+            os.makedirs("tsne_data", exist_ok=True)
+
+            attack_name = self.config.get('attack', 'unknown').lower()
+            global_state = self.global_model.state_dict()
+
+            # 动态寻找分类层（最后一层权重），过滤掉偏置(bias)和批归一化(BN)层
+            last_layer_key = None
+            for key in reversed(list(global_state.keys())):
+                if 'weight' in key and ('fc' in key or 'linear' in key or 'classifier' in key):
+                    last_layer_key = key
+                    break
+            # 兜底：取模型参数字典的倒数第二个键
+            if last_layer_key is None:
+                last_layer_key = list(global_state.keys())[-2]
+
+            print(f"\n[实验 3.1 探针] 截取特征轮次: {TARGET_ROUND} | 目标层: {last_layer_key}")
+
+            X, y = [], []
+            for res in client_results:
+                client_state = res['model_state']
+                if last_layer_key in client_state and last_layer_key in global_state:
+                    # 严谨的张量处理：脱离计算图 -> 转CPU -> 转Numpy -> 展平
+                    global_w = global_state[last_layer_key].detach().cpu()
+                    client_w = client_state[last_layer_key].detach().cpu()
+                    delta_w = (client_w - global_w).numpy().flatten()
+
+                    X.append(delta_w)
+                    # 标签标注：1=恶意更新, 0=良性更新
+                    y.append(1 if res.get('active_attack', False) else 0)
+
+            if len(X) > 0:
+                save_path = f"tsne_data/tsne_{attack_name}.pt"
+                torch.save({'X': np.array(X), 'y': np.array(y)}, save_path)
+                print(f"[实验 3.1 成功] 截取 {len(X)} 个客户端特征，已存至 {save_path}\n")
+            else:
+                print("[实验 3.1 失败] 客户端权重解析异常，未提取到特征。")
+        # =====================================================================
+
+        # 下方保留原始的聚合逻辑，不作改动
+
         # Use first method for now
         agg_method = self.aggregation_methods[0]
 

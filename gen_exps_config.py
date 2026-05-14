@@ -550,13 +550,14 @@ def set_pattern_attack_configs(config: dict, dataset: str, attack_type: str, tar
         config['client_attacks'].append({
             'name': 'FedDAREAttack',
             'target_class': target_label,
-            'drop_rate': 0.99,  # 建议用您主实验的最佳参数 0.99
-            'gamma': 100,  # 建议用您主实验的最佳参数 50
+            'drop_rate': 0.9,  # 建议用您主实验的最佳参数 0.99
+            'gamma': 10,  # 建议用您主实验的最佳参数 50
             'ablation_mode': 'none',  # 完整版，不开启消融
             'trigger_height': default_size,
             'trigger_width': default_size,
             'poison_ratio': 0.5,
             'apply_to_client_ids': id_adversarial_clients,
+
         })
         # ================= 新增：FedDARE 消融实验分支 =================
     elif attack_type.lower() == "feddare_no_sign":
@@ -831,7 +832,7 @@ List[str]:
     list_output_paths = []
     num_clients_list = [100]
     alpha_non_iid_list = [0.5]
-    # alpha_non_iid_list = [0.1, 0.2, 1.0, 5.0, 10.0]
+    # alpha_non_iid_list = [0.1, 0.5, 1.0, 5.0, 10.0]
     # start_rounds = [400] # 500 0
     start_rounds = [0]  # 500 0
     # num_rounds_training = [60]  # 600 # 200
